@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- LLM API 调用 + net.proxy 代理转发 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- notify.send：AI 生成的 UI 可发真实系统通知（运行时请求） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- haptics.tap -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- contacts_search：通讯录搜索（运行时授权） -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <!-- location_get：真实定位能力（运行时授权） -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- calendar_query / calendar_add：读写系统日历 -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+    <!-- flashlight：手电筒（真实控制闪光灯，Android 6+ 归入相机权限组） -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.flash" android:required="false" />
+    <!-- 精确闹钟（Android 12+ 需用户在系统设置授权） -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
+    <!-- ==== v0.11 权限补齐：让 AI 能触达的能力面与系统一致 ==== -->
+
+    <!-- 媒体控制：播放/暂停/切歌（AI 做音乐界面时真的能控制） -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- 媒体库读取（Android 13+ 拆分权限）：做相册/音乐界面要能列出真实内容 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- Android 12 及以下的存储读取（用于媒体库回退路径） -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <!-- 麦克风：语音输入类界面（真实录音） -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 蓝牙：连接/扫描外设（Android 12+ 拆分权限） -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <!-- 后台定位：需要持续位置的任务（如运动轨迹） -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <!-- 活动识别：计步/运动状态 -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <!-- 勿扰模式读取：系统面板类界面需要显示真实状态 -->
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
+    <!-- 悬浮窗与使用情况访问：无法运行时请求，只能引导用户去系统设置 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <!-- 自启动：开机后让 GenUI 就绪（实际自启还受厂商 ROM 白名单限制，需引导用户开启） -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 相机（除闪光灯外的拍照能力） -->
+
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@style/Theme.GenUI"
+        android:allowBackup="true"
+        android:supportsRtl="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+            <receiver android:name=".bridge.AlarmReceiver" android:exported="false" />
+            <receiver
+                android:name=".bridge.BootReceiver"
+                android:enabled="true"
+                android:exported="true">
+                <intent-filter>
+                    <action android:name="android.intent.action.BOOT_COMPLETED" />
+                    <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                </intent-filter>
+            </receiver>
+    </application>
+</manifest>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- GenUI：深空底色 + 霓虹青紫强调（与壳 UI 的暗色科技调性一致） -->
+    <style name="Theme.GenUI" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#14110E</item>
+        <item name="android:statusBarColor">#14110E</item>
+        <item name="android:navigationBarColor">#14110E</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+    <style name="GenLauncher" parent="android:Theme.Material.NoActionBar" />
+</resources>

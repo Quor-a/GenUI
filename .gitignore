@@ -1,0 +1,16 @@
+# Gradle / build
+.gradle/
+build/
+**/build/
+local.properties
+*.iml
+.idea/
+captures/
+
+# OS
+.DS_Store
+
+# 无关的本地实验仓库，不随 GenUI 发布
+InkWrite/
+AstrBot-Android-App/
+/apk/
