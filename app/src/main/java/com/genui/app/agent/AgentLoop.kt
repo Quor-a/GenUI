@@ -124,6 +124,19 @@ class AgentLoop(
                             "调用结果中 is_error=true 表示工具侧报错。"))
                     }
                 }
+                runCatching {
+                    // 运行时工具：run_js（代码运行时）+ 插件管理 + 已装插件工具
+                    val rtDecls = tools.runtimeDeclarations()
+                    for (i in 0 until rtDecls.length()) decls.put(rtDecls.getJSONObject(i))
+                    val plDecls = PluginRuntime.declarations(appContext)
+                    for (i in 0 until plDecls.length()) decls.put(plDecls.getJSONObject(i))
+                    if (plDecls.length() > 0) {
+                        onStatus("运行时：JS引擎 + ${plDecls.length()} 个插件工具就绪")
+                        messages.put(JSONObject().put("role", "system").put("content",
+                            "代码运行时已就绪（run_js 可真实执行 JS）。已加载插件，plugin_ 前缀函数是插件工具，" +
+                            "插件返回 ok=false 表示插件侧出错。"))
+                    }
+                }
                 // 关键立场：工具调用【不再被固定轮数腰斩】。模型想查多少轮就查多少轮，
                 // 自己会靠 NO_TOOLS / 直接成稿收尾。maxToolRounds 现在只是【软提醒阈值】——
                 // 超过后轻推一次、绝不强制中断；0 = 完全不限制。
@@ -497,6 +510,16 @@ class AgentLoop(
         }
         if (verdict != null) {
             return JSONObject().put("denied", verdict)
+        }
+        // 插件路由：plugin_ 前缀工具在代码运行时引擎内执行
+        if (name.startsWith("plugin_")) {
+            return try {
+                kotlinx.coroutines.withTimeout(90_000) { PluginRuntime.callTool(appContext, name, args) }
+            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                JSONObject().put("error", "插件工具执行超时（90秒）。")
+            } catch (e: Exception) {
+                JSONObject().put("error", "插件调用失败：${e.message ?: "未知错误"}")
+            }
         }
         // MCP 路由：mcp_ 前缀工具交由外部服务器执行（授权已按 "mcp" 族完成）
         if (name.startsWith("mcp_")) {

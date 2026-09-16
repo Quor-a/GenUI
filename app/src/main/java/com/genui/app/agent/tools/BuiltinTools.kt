@@ -91,6 +91,28 @@ class BuiltinTools(private val context: Context) {
                         .put("type", "object").put("properties", props)
                         .put("required", JSONArray(required))))
 
+        fun runJsDecl(): JSONObject = decl("run_js",
+            "在 GenUI 内置 JS 引擎（Chromium）中真实执行 JavaScript。支持 async/await/fetch；console.log 输出与 return 返回值均回传。代码为函数体（自动包 async function）。适合计算、数据处理、算法验证、调外部 REST API。",
+            JSONObject()
+                .put("code", JSONObject().put("type", "string").put("description", "JS 代码（函数体），例：const r = await fetch('https://api.x.com').then(r=>r.json()); return r;")),
+            listOf("code"))
+
+        fun pluginListDecl(): JSONObject = decl("list_plugins", "列出已安装的 GenUI 插件（含各插件声明的工具）。",
+            JSONObject(), listOf())
+
+        fun installPluginDecl(): JSONObject = decl("install_plugin",
+            "安装 GenUI 插件：JS 代码 + 工具清单，安装后其工具自动并入工具列表（plugin_ 前缀），后续对话可直接调用。code 必须为返回函数映射的函数体，如：return { query: async (args) => { const r = await fetch(...); return await r.json(); } }",
+            JSONObject()
+                .put("name", JSONObject().put("type", "string").put("description", "插件名"))
+                .put("tools_json", JSONObject().put("type", "string").put("description", "工具清单 JSON 数组字符串：[{\"name\":\"query\",\"description\":\"...\",\"parameters\":{\"type\":\"object\",\"properties\":{...},\"required\":[...]}}]"))
+                .put("code", JSONObject().put("type", "string").put("description", "插件 JS 代码（函数体），必须 return {工具名: async (args)=>结果} 的函数映射"))
+                .put("version", JSONObject().put("type", "string").put("description", "版本号，默认 1.0")),
+            listOf("name", "tools_json", "code"))
+
+        fun uninstallPluginDecl(): JSONObject = decl("uninstall_plugin", "卸载指定插件（按 id 或名称）。",
+            JSONObject().put("id", JSONObject().put("type", "string").put("description", "插件 id 或名称")),
+            listOf("id"))
+
         return JSONArray()
             .put(decl("web_search", "联网搜索实时信息，返回带编号 [n] 的资料片段与可溯源引用（完整管线：查询改写 → 多引擎并发检索 → 五信号重排 → 正文精读 → 引用打包）。凡涉及时效性信息（新闻、价格、版本号、赛事、天气、汇率、今天发生的事）必须先调用它，不要凭记忆回答。回答时在关键事实后标注 [n]，n 对应返回的 citations 编号。",
                 JSONObject()
@@ -212,6 +234,19 @@ class BuiltinTools(private val context: Context) {
                 args.optInt("max", 10)
             )
             "web_fetch" -> webFetch(args.optString("url"), args.optInt("max_chars", 4000))
+            "run_js" -> com.genui.app.agent.CodeRuntime.runJs(
+                context, args.optString("code", ""))
+            "list_plugins" -> JSONObject().put("plugins", JSONArray().apply {
+                com.genui.app.agent.PluginRuntime.list(context).forEach { p ->
+                    put(JSONObject().put("id", p.id).put("name", p.name).put("version", p.version)
+                        .put("tools", JSONArray(p.tools.map { it.name })))
+                }
+            })
+            "install_plugin" -> com.genui.app.agent.PluginRuntime.install(
+                context, args.optString("name"), args.optString("version", "1.0"),
+                args.optString("tools_json"), args.optString("code"))
+            "uninstall_plugin" -> com.genui.app.agent.PluginRuntime.uninstall(
+                context, args.optString("id"))
             "memory_write" -> memory.write(args.optString("key"), args.optString("content"))
             "memory_read" -> memory.read(args.optString("key"))
             "memory_list" -> memory.list()
@@ -247,7 +282,45 @@ class BuiltinTools(private val context: Context) {
     }
 
     /** 调用是否应该走权限门禁（按"工具族"检查） */
+    private fun rtDecl(name: String, desc: String, props: JSONObject, required: List<String>): JSONObject =
+        JSONObject().put("type", "function").put("function", JSONObject()
+            .put("name", name).put("description", desc)
+            .put("parameters", JSONObject().put("type", "object")
+                .put("properties", props).put("required", JSONArray(required))))
+
+    fun runJsDecl(): JSONObject = rtDecl("run_js",
+        "在 GenUI 内置 JS 引擎（Chromium）中真实执行 JavaScript。支持 async/await/fetch；console.log 输出与 return 返回值均回传。代码为函数体（自动包 async function）。适合计算、数据处理、算法验证、调外部 REST API。",
+        JSONObject()
+            .put("code", JSONObject().put("type", "string").put("description", "JS 代码（函数体），例：const r = await fetch('https://api.x.com').then(r=>r.json()); return r;")),
+        listOf("code"))
+
+    fun pluginListDecl(): JSONObject = rtDecl("list_plugins", "列出已安装的 GenUI 插件（含各插件声明的工具）。",
+        JSONObject(), listOf())
+
+    fun installPluginDecl(): JSONObject = rtDecl("install_plugin",
+        "安装 GenUI 插件：JS 代码 + 工具清单，安装后其工具自动并入工具列表（plugin_ 前缀），后续对话可直接调用。code 必须为返回函数映射的函数体，如：return { query: async (args) => { const r = await fetch(...); return await r.json(); } }",
+        JSONObject()
+            .put("name", JSONObject().put("type", "string").put("description", "插件名"))
+            .put("tools_json", JSONObject().put("type", "string").put("description", "工具清单 JSON 数组字符串：[{\"name\":\"query\",\"description\":\"...\",\"parameters\":{\"type\":\"object\",\"properties\":{...},\"required\":[...]}}]"))
+            .put("code", JSONObject().put("type", "string").put("description", "插件 JS 代码（函数体），必须 return {工具名: async (args)=>结果} 的函数映射"))
+            .put("version", JSONObject().put("type", "string").put("description", "版本号，默认 1.0")),
+        listOf("name", "tools_json", "code"))
+
+    fun uninstallPluginDecl(): JSONObject = rtDecl("uninstall_plugin", "卸载指定插件（按 id 或名称）。",
+        JSONObject().put("id", JSONObject().put("type", "string").put("description", "插件 id 或名称")),
+        listOf("id"))
+
+    /** 运行时工具声明（代码运行时 + 插件运行时），由 AgentLoop 并入 function calling */
+    fun runtimeDeclarations(): JSONArray = JSONArray()
+        .put(runJsDecl())
+        .put(pluginListDecl())
+        .put(installPluginDecl())
+        .put(uninstallPluginDecl())
+
     fun gateFor(name: String): String = when {
+        name == "run_js" -> "code"
+        name.startsWith("plugin_") || name.startsWith("install_plugin") ||
+            name.startsWith("uninstall_plugin") || name == "list_plugins" -> "plugin"
         name.startsWith("mcp_") -> "mcp"
         name.startsWith("memory") -> "memory"
         name.startsWith("time") -> "time"

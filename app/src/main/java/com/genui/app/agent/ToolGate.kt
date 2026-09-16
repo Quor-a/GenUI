@@ -33,7 +33,7 @@ class ToolGate(context: Context) {
             "memory" to 2, "clipboard" to 2, "apps" to 2, "tts" to 2, "flashlight" to 2,
             "web_search" to 3, "web_fetch" to 3, "file" to 3, "alarm" to 3, "open_url" to 3,
             "news_search" to 3, "community_search" to 3, "github_search" to 3,
-            "calendar" to 3, "system" to 3, "mcp" to 3,
+            "calendar" to 3, "system" to 3, "mcp" to 3, "code" to 3, "plugin" to 3,
             "notify" to 4, "location" to 4,
             "contacts" to 5, "sms" to 5, "call" to 5
         )
@@ -44,6 +44,8 @@ class ToolGate(context: Context) {
 
         fun brief(tool: String): String = when (tool) {
             "mcp" -> "MCP 外部工具调用"
+            "code" -> "内置 JS 引擎真实执行代码"
+            "plugin" -> "插件安装/卸载/调用"
             "time" -> "设备时间与日期"
             "device" -> "设备型号/电量/网络/存储/音量状态"
             "haptics" -> "震动反馈"
