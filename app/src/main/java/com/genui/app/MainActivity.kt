@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import com.genui.app.store.GenStore
+import com.genui.app.ui.settings.McpConfigScreen
 import com.genui.app.ui.settings.MemoryScreen
 import com.genui.app.ui.settings.ModelConfigScreen
 import com.genui.app.ui.settings.PermissionScreen
@@ -101,6 +102,7 @@ class MainActivity : ComponentActivity() {
                                 NavTarget.Memory     -> MemoryScreen(store = store, onBack = { screen = NavTarget.Settings })
                                 NavTarget.Perms      -> PermissionScreen(store = store, onBack = { screen = NavTarget.Settings })
                                 NavTarget.ModelConfig -> ModelConfigScreen(store = store, onBack = { screen = NavTarget.Settings })
+                                NavTarget.Mcp -> McpConfigScreen(context = store.context(), onBack = { screen = NavTarget.Settings })
                                 NavTarget.Settings   -> SettingsScreen(
                                     store = store,
                                     onBack = close,
@@ -110,6 +112,7 @@ class MainActivity : ComponentActivity() {
                                             SettingsItem.Memory -> NavTarget.Memory
                                             SettingsItem.Perms -> NavTarget.Perms
                                             SettingsItem.ModelConfig -> NavTarget.ModelConfig
+                                            SettingsItem.Mcp -> NavTarget.Mcp
                                         }
                                     }
                                 )

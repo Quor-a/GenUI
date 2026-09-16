@@ -248,6 +248,7 @@ class BuiltinTools(private val context: Context) {
 
     /** 调用是否应该走权限门禁（按"工具族"检查） */
     fun gateFor(name: String): String = when {
+        name.startsWith("mcp_") -> "mcp"
         name.startsWith("memory") -> "memory"
         name.startsWith("time") -> "time"
         name.startsWith("device") || name == "system_status" -> "device"

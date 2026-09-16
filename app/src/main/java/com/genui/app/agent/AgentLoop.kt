@@ -112,6 +112,18 @@ class AgentLoop(
             // ---------- 决策轮（带工具，OpenAI 兼容协议才支持 function calling） ----------
             if (provider.protocol == Protocol.OPENAI) {
                 val decls = tools.declarations()
+                // MCP 聚合：所有已启用服务器的外部工具并入 function calling。
+                // 单台失败不影响其他，也不阻塞本次生成（runCatching 兜底）。
+                runCatching {
+                    val mcpDecls = McpManager.aggregateDeclarations(appContext)
+                    for (i in 0 until mcpDecls.length()) decls.put(mcpDecls.getJSONObject(i))
+                    if (mcpDecls.length() > 0) {
+                        onStatus("MCP：已并入 ${mcpDecls.length()} 个外部工具")
+                        messages.put(JSONObject().put("role", "system").put("content",
+                            "已连接外部 MCP 服务器，工具列表中 mcp_ 前缀的函数来自外部服务器，可直接调用。" +
+                            "调用结果中 is_error=true 表示工具侧报错。"))
+                    }
+                }
                 // 关键立场：工具调用【不再被固定轮数腰斩】。模型想查多少轮就查多少轮，
                 // 自己会靠 NO_TOOLS / 直接成稿收尾。maxToolRounds 现在只是【软提醒阈值】——
                 // 超过后轻推一次、绝不强制中断；0 = 完全不限制。
@@ -485,6 +497,16 @@ class AgentLoop(
         }
         if (verdict != null) {
             return JSONObject().put("denied", verdict)
+        }
+        // MCP 路由：mcp_ 前缀工具交由外部服务器执行（授权已按 "mcp" 族完成）
+        if (name.startsWith("mcp_")) {
+            return try {
+                kotlinx.coroutines.withTimeout(90_000) { McpManager.routeCall(appContext, name, args) }
+            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                JSONObject().put("error", "MCP 工具执行超时（90秒）。")
+            } catch (e: Exception) {
+                JSONObject().put("error", "MCP 调用失败：${e.message ?: "未知错误"}")
+            }
         }
         // 超时保护：单个工具最长 40 秒，避免一个卡住的工具拖死整个生成
         val result = try {

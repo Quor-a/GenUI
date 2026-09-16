@@ -107,7 +107,7 @@ sealed interface NativeRender {
  * 这里是全 App 仅有的"内置 UI"，WebView 内的一切皆由 AI 写出。
  */
 /** 主屏可达的子系统导航目标 */
-enum class NavTarget { Soul, Memory, Perms, ModelConfig, Settings }
+enum class NavTarget { Soul, Memory, Perms, ModelConfig, Mcp, Settings }
 
 /**
  * 生成阶段 —— 状态行的语义骨架。
