@@ -81,7 +81,8 @@ object Explore {
             val snip = ChinaText.clean(Regex("(?s)<div class=\"(?:fz-mid|space-txt|text-layout)[^\"]*\"[^>]*>(.*?)</div>")
                 .find(m.groupValues[2])?.groupValues?.get(1) ?: "").take(200)
             out.add(JSONObject().put("title", title).put("url", url)
-                .put("source", "sogou-news").put("date", "").put("snippet", snip))
+                .put("source", "sogou-news").put("engine", "sogou")
+                .put("heat", max - out.size).put("date", "").put("snippet", snip))
         }
         return Pair(out, if (out.isEmpty()) "无结果" else "ok(${out.size})")
     }
@@ -100,7 +101,8 @@ object Explore {
             val snip = ChinaText.clean(Regex("(?s)<span class=\"c-color-text[^\"]*\">(.*?)</span>")
                 .find(m.groupValues[3])?.groupValues?.get(1) ?: "").take(200)
             out.add(JSONObject().put("title", title).put("url", url)
-                .put("source", "baidu-news").put("date", "").put("snippet", snip))
+                .put("source", "baidu-news").put("engine", "baidu")
+                .put("heat", max - out.size).put("date", "").put("snippet", snip))
         }
         return Pair(out, if (out.isEmpty()) "无结果" else "ok(${out.size})")
     }
@@ -266,6 +268,8 @@ object Explore {
                     .put("title", title)
                     .put("url", link)
                     .put("source", source)
+                    .put("engine", source)
+                    .put("heat", max - out.size)
                     .put("date", date)
                     .put("snippet", desc))
             }

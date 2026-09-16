@@ -85,21 +85,34 @@ fun NativeWidgetSheet(
             }
             Spacer(Modifier.height(14.dp))
 
-            when (kind) {
-                "stat" -> StatWidget(data)
-                "bar" -> BarWidget(data)
-                "line" -> LineWidget(data)
-                "progress" -> ProgressWidget(data)
-                "list" -> ListWidget(data, onResult = { onResult(it); onDismiss() })
-                "form" -> FormWidget(data, onResult = { onResult(it); onDismiss() })
-                "slider" -> SliderWidget(data, onResult = { onResult(it); onDismiss() })
-                "timeline" -> TimelineWidget(data)
-                else -> Text(
-                    "未知组件类型：$kind\n可用：${NativeWidgetSchema.KINDS}",
-                    color = GenTheme.Dim, fontSize = 12.sp, lineHeight = 18.sp
-                )
-            }
+            WidgetContent(kind, data, onResult = { onResult(it); onDismiss() })
         }
+    }
+}
+
+/** 8 种原生组件的分发渲染 —— NativeWidgetSheet 与可视化弹窗（ui.popup）共用 */
+@Composable
+fun WidgetContent(kind: String, data: JSONObject, onResult: (JSONObject) -> Unit) {
+    // AI 自写自注册的动态组件优先：kind 命中注册表 → 模板+data 实例化 → Compose 原生渲染
+    if (com.genui.app.render.DynamicComponents.has(kind)) {
+        com.genui.app.render.DynamicComponents.resolve(kind, data)?.let { expanded ->
+            com.genui.app.render.ComposeDescRenderer.Render(expanded)
+            return
+        }
+    }
+    when (kind) {
+        "stat" -> StatWidget(data)
+        "bar" -> BarWidget(data)
+        "line" -> LineWidget(data)
+        "progress" -> ProgressWidget(data)
+        "list" -> ListWidget(data, onResult = onResult)
+        "form" -> FormWidget(data, onResult = onResult)
+        "slider" -> SliderWidget(data, onResult = onResult)
+        "timeline" -> TimelineWidget(data)
+        else -> Text(
+            "未知组件类型：$kind\n可用：${NativeWidgetSchema.KINDS}",
+            color = GenTheme.Dim, fontSize = 12.sp, lineHeight = 18.sp
+        )
     }
 }
 

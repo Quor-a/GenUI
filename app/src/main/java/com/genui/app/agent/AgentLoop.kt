@@ -30,7 +30,9 @@ class AgentLoop(
     private val onHtmlDelta: (String) -> Unit,     // 渲染轮流式增量
     private val onAskPermission: suspend (tool: String, brief: String, level: Int) -> Boolean = { _, _, _ -> true },
     /** 结构化事件流：思考/决策/工具全过程。UI 用它画时间线。 */
-    private val onEvent: (AgentEvent) -> Unit = {}
+    private val onEvent: (AgentEvent) -> Unit = {},
+    /** 问答直答：用户在生成模式里提问/闲聊时，Agent 以文字回答（不渲染界面） */
+    private val onTextAnswer: (String) -> Unit = {}
 ) {
     private val appContext = context.applicationContext
     val tools = BuiltinTools(appContext)
@@ -42,6 +44,10 @@ class AgentLoop(
     @Volatile var cancelled = false
         private set
     fun cancel() { cancelled = true; llm.cancel() }
+
+    /** 渲染轮思考缓冲：onReasoning 每 token 一发，直接进时间线会刷出几百条单字碎片 */
+    private val renderThinkBuf = StringBuilder()
+    private var lastThinkEmit = 0L
 
     /** 统计本次生成的工具调用次数（供 Finished 事件） */
     private var toolCallCount = 0
@@ -63,11 +69,29 @@ class AgentLoop(
         val system = Prompts.systemWith(soul, tools.memory.indexForPrompt(), recentHistory())
         // 决策轮专用提示：此阶段禁止写 HTML，只决定工具调用；否则模型会在决策轮
         // 就开始输出整页 HTML（非流式、耗时且被丢弃，导致画布空白）
-        val decisionSystem = system + "\n\n# 当前阶段：工具决策（重要）\n" +
-            "现在是【决策阶段】，禁止输出 HTML 文档。只做两件事之一：\n" +
+        val decisionSystem = system +
+            "\n\n# 你在哪个模式、该干什么（先读这个）\n" +
+            "你是 GenUI 的智能体——GenUI 是一个把 AI 回复变成真实可用界面的 Android 应用，" +
+            "它有两个界面：【Agent 对话框】（聊天/问答/出数据卡）和【GenUI 画布】（生成完整可交互页面）。\n" +
+            "你当前在【GenUI 画布模式】：用户的这条输入就是**生成指令**，你的产出是一整页" +
+            "真实可交互的 HTML 界面——不是聊天回复。此处没有寒暄：规划→取真实数据→渲染。\n" +
+            "（Agent 对话框由另一个会话负责，与本模式无关。）\n" +
+            "\n# 当前阶段：规划 + 工具决策（重要）\n" +
+            "输出顺序必须是：先 [PLAN] 规划块，再做决策。禁止输出 HTML 文档。\n" +
+            "[PLAN] 块格式（每行一条，不写废话）：\n" +
+            "  需求：一句话说清用户要什么\n" +
+            "  通道：html|xml|compose|canvas + 一句理由（要数据/交互/MoBridge 必选 html）\n" +
+            "  功能：功能名 —— 真实实现(数据源：哪个工具/API) | 演示数据(界面需标注) | 不做(理由)\n" +
+            "  数据：列出取数途径\n" +
+            "决策（三选一，跟在 [PLAN] 块之后）：\n" +
             "a) 需要实时信息/记忆/设备能力 → 调用相应工具（可连续多个）；\n" +
-            "b) 无任何工具需求 → 只回复四个字符：NO_TOOLS。\n" +
-            "不要写界面、不要写代码、不要解释。"
+            "b) 用户要界面/页面/应用/工具/可视化/卡片 → 只回复四个字符：NO_TOOLS。\n" +
+            "★ 特例：用户让你『介绍你自己 / 展示你能做什么 / 自我介绍』→ 这是 GenUI 的" +
+            "招牌演示场景，必须选 b) 渲染一个自我介绍页（把身份/能力/工作方式/原则做成" +
+            "可视化界面呈现），严禁文字直答——文字介绍自己等于让厨师用嘴报菜名。\n" +
+            "⚠ 用户要界面时永远禁止选 c)；规划里的功能取舍必须诚实——没有真实数据源的就写" +
+            "「演示数据」，不要硬装成真的。\n" +
+            "不要写界面代码、不要解释你的选择。"
 
         val messages = JSONArray()
             .put(JSONObject().put("role", "system").put("content", decisionSystem))
@@ -121,9 +145,17 @@ class AgentLoop(
                         onEvent(AgentEvent.Thinking(it.groupValues[1].take(400)))
                     }
                     val content = rawContent.replace(Regex("(?s)<think>.*?</think>"), "").trim()
+                    // [PLAN] 规划块：解析进时间线展示；决策判断用剥离后的 decisionContent，
+                    // 写回上下文的 content 保留规划原文（渲染轮按规划执行）
+                    val planMatch = Regex("(?s)\\[PLAN\\]\\s*([\\s\\S]*?)(?=\\[(?:TOOLS|QA)\\]|NO_TOOLS|$)").find(content)
+                    planMatch?.let { m ->
+                        val plan = m.groupValues[1].trim()
+                        if (plan.isNotBlank()) onEvent(AgentEvent.Plan(plan))
+                    }
+                    val decisionContent = planMatch?.let { content.replace(it.value, "").trim() } ?: content
 
                     if (calls == null || calls.length() == 0) {
-                        if (content.isNotBlank() && content.contains("<!DOCTYPE", ignoreCase = true)) {
+                        if (decisionContent.isNotBlank() && decisionContent.contains("<!DOCTYPE", ignoreCase = true)) {
                             // 决策轮直接交出 HTML（罕见）：流式写入画布后完成，不丢内容
                             onStatus("直接出稿 · ${kb(content.length)}")
                             onEvent(AgentEvent.Decided(0, "不需要工具，直接成稿"))
@@ -225,6 +257,8 @@ class AgentLoop(
             // ---------- 渲染轮（流式出 HTML） ----------
             if (cancelled) return
             onStatus("写界面 · 流式渲染中")
+            renderThinkBuf.setLength(0)
+            lastThinkEmit = 0L
             onEvent(AgentEvent.Rendering(if (!seedHtml.isNullOrBlank()) "接着已中断的部分继续写…" else "开始绘制界面…"))
 
 
@@ -302,6 +336,19 @@ class AgentLoop(
                 "直接输出写入 WebView 画布的原始 HTML 文档：以 <!DOCTYPE html> 开头、以 </html> 结尾。" +
                 "不要使用 Markdown 代码块包裹（不要写 ```html 或 ```）；也不要写任何解释性文字、状态汇报、" +
                 "思考过程或元叙述——尤其不要复述用户输入里的『接着成稿』『数据已备齐』等备注，直接以 <!DOCTYPE html> 起头。\n" +
+                "⚠ 汇报/旁白类文字（如『数据拿到了…落笔。』）绝对禁止出现在页面里——包括 <body> 开头。" +
+                "它们会被端上剥离并转到对话流，页面上只允许存在界面内容本身。\n" +
+                "⚠ 每个界面至少包含一个真实可交互的功能：事件已绑定的按钮/输入框/切换标签，" +
+                "点了必须发生真实的事（见交互绑定纪律与真实功能铁律）。" +
+                "纯静态展示页仅在用户明确要求静态时输出。\n" +
+                "★ 零失败交互协议（优先用）：按钮/元素加 data-ga 属性，端上原生执行真实行为，" +
+                "不依赖任何页面 JS，永不失效：\n" +
+                "  <button data-ga=\"notify:天气提醒|今天有雨\">提醒我</button>   系统通知\n" +
+                "  <button data-ga=\"toast:已保存\">保存</button>                原生提示\n" +
+                "  <button data-ga=\"copy:复制的文本\">复制</button>              写剪贴板\n" +
+                "  <button data-ga=\"speak:要朗读的文本\">朗读</button>           TTS 出声\n" +
+                "  <button data-ga=\"open:https://...\">打开</button>             浏览器打开\n" +
+                "  <button data-ga=\"vibrate\">震动</button>                      震动反馈\n" +
                 "\n# 质量自检（输出前心里过一遍）\n" +
                 "界面至少包含：清晰的层级标题、真实密度的内容、一处数据可视化（图表/进度/徽标任选）、" +
                 "至少一个可交互反馈（按钮按压态/状态切换/过渡动画）、内联 SVG 图标至少两枚。\n" +
@@ -339,7 +386,15 @@ class AgentLoop(
                         onDone(html, extractTitle(html))
                     }
                 },
-                onReasoning = { chunk -> onEvent(AgentEvent.Thinking(chunk.take(300))) },
+                onReasoning = { chunk ->
+                    renderThinkBuf.append(chunk)
+                    val now = System.currentTimeMillis()
+                    if (now - lastThinkEmit > 300) {
+                        lastThinkEmit = now
+                        onEvent(AgentEvent.Thinking(
+                            renderThinkBuf.takeLast(200).toString().replace("\n", " ")))
+                    }
+                },
                 onError = { msg ->
                     if (deliver().isBlank()) throw RuntimeException(msg)
                     val html = deliver()
@@ -365,6 +420,21 @@ class AgentLoop(
 
     /** 已播报的 4KB 里程碑数（渲染进度去抖） */
     private var lastMilestone = 0
+
+    /** UI 意图关键词兜底：用户在要界面/应用/工具时，禁止模型以文字回答搪塞进对话框 */
+    private fun isUiIntent(prompt: String): Boolean {
+        val nouns = listOf(
+            "页面", "网页", "界面", "应用", "小程序", "工具", "仪表盘", "看板", "面板",
+            "卡片", "图表", "表单", "计算器", "游戏", "Dashboard", "dashboard",
+        )
+        // 自我展示类：GenUI 里让 AI 介绍自己 = 招牌演示场景，必须出页面
+        val selfShow = listOf(
+            "你自己", "自我介绍", "介绍自己", "你是谁", "介绍下你", "介绍一下你",
+            "你的能力", "你能做什么", "展示一下你",
+        )
+        return nouns.any { prompt.contains(it, ignoreCase = true) } ||
+            selfShow.any { prompt.contains(it) }
+    }
 
     /** 续写/追问这类明确不需要联网的短指令，跳过预检省一次请求 */
     private fun isPrefetchSkipped(prompt: String): Boolean {

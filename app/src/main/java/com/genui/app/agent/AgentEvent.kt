@@ -27,6 +27,18 @@ sealed class AgentEvent {
         override val ts: Long = System.currentTimeMillis()
     ) : AgentEvent()
 
+    /** 规划块：需求/通道/功能取舍/数据源，先于一切实现输出 */
+    data class Plan(
+        val text: String,
+        override val ts: Long = System.currentTimeMillis()
+    ) : AgentEvent()
+
+    /** 问答直答：生成模式里 Agent 以文字回答（不渲染界面） */
+    data class TextAnswer(
+        val text: String,
+        override val ts: Long = System.currentTimeMillis()
+    ) : AgentEvent()
+
     /** 思考中：模型正在处理（等待首个 token 或长耗时阶段） */
     data class Thinking(
         val note: String,
@@ -145,7 +157,7 @@ class ThinkingTimeline {
         val running: Boolean = false
     )
 
-    enum class Kind { START, THINK, DECIDE, TOOL, AUTH, DENIED, RESULT, RENDER, PAINT, DONE, ERROR }
+    enum class Kind { START, THINK, DECIDE, PLAN, TOOL, AUTH, DENIED, RESULT, RENDER, PAINT, DONE, ERROR }
 
     /** 追加一条，返回其索引（供后续更新 running 状态） */
     fun add(kind: Kind, text: String, detail: String = "", level: Int = 0, running: Boolean = false): Int =

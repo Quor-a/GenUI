@@ -68,6 +68,30 @@ class GenStore(context: Context) {
 
     /** 对话模式：ui = GenUI 一句话生成界面；agent = 标准 Agent 多轮对话。默认 ui。 */
     @Synchronized
+    /** 对话历史持久化：chatlog.json（重启不丢） */
+    fun saveChatLog(items: List<Triple<String, String, String>>, done: List<Boolean>, ts: List<Long>) {
+        val arr = org.json.JSONArray()
+        for (i in items.indices) {
+            arr.put(org.json.JSONObject()
+                .put("id", items[i].first).put("role", items[i].second)
+                .put("text", items[i].third).put("done", done[i]).put("ts", ts[i]))
+        }
+        runCatching { File(dir, "chatlog.json").writeText(arr.toString()) }
+    }
+
+    fun loadChatLog(): List<ChatLogEntry> = runCatching {
+        val f = File(dir, "chatlog.json")
+        if (!f.exists()) return emptyList()
+        val arr = org.json.JSONArray(f.readText())
+        (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            ChatLogEntry(o.optString("id"), o.optString("role"), o.optString("text"),
+                o.optBoolean("done", true), o.optLong("ts"))
+        }
+    }.getOrDefault(emptyList())
+
+    fun clearChatLog() { runCatching { File(dir, "chatlog.json").delete() } }
+
     fun loadMode(): String {
         if (!cfgFile.exists()) return "ui"
         return runCatching {
@@ -141,3 +165,7 @@ class GenStore(context: Context) {
     private fun readKV(): JSONObject = runCatching { JSONObject(kvFile.readText()) }
         .getOrDefault(JSONObject())
 }
+
+
+/** 对话历史条目（持久化用） */
+data class ChatLogEntry(val id: String, val role: String, val text: String, val done: Boolean, val ts: Long)

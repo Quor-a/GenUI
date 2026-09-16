@@ -23,6 +23,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -38,10 +39,12 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.genui.app.agent.AgentLoop
+import com.genui.app.BuildConfig
 import com.genui.app.agent.ChatMsg
 import com.genui.app.agent.ChatSession
 import com.genui.app.agent.ToolGate
 import com.genui.app.render.A2UIRenderer
+import com.genui.app.render.TAP_NORMALIZER_JS
 import com.genui.app.render.CanvasNativeView
 import com.genui.app.render.ComposeDescRenderer
 import com.genui.app.store.GeneratedPage
@@ -80,6 +83,8 @@ private fun ModeRow(title: String, desc: String, selected: Boolean, onClick: () 
 sealed interface NativeRender {
     data class Xml(val xml: String) : NativeRender
     data class Compose(val json: String) : NativeRender
+    /** 树含官方引擎专属类型 → 整树交给 A2UI-Android 渲染 */
+    data class A2uiEmbedded(val message: String) : NativeRender
 
     /**
      * 代码呈现层 —— Kotlin / Java / C++ / Python 这类端上跑不了的语言，
@@ -137,6 +142,8 @@ fun GenScaffold(
     val agentRef = remember { mutableStateOf<AgentLoop?>(null) }
 
     var cmd by remember { mutableStateOf("") }
+    // 渲染收尾体检结果：非空时画布顶部挂提示条，一键让 AI 定向修复（省整页重生成）
+    var renderIssue by remember { mutableStateOf<Pair<List<String>, List<String>>?>(null) }
     val soul = remember {
         val ss = com.genui.app.agent.SoulStore(ctx)
         ss.load() ?: ss.fallback
@@ -191,8 +198,29 @@ fun GenScaffold(
 
     // —— 对话模式：ui = GenUI 生成界面 / agent = 标准 Agent 对话 ——
     var chatMode by remember { mutableStateOf(store.loadMode()) }
+    /** 对话面板让位开关：纯问答/画布出稿后暂时收起面板，让用户看见画布；snackbar 可召回 */
+    var canvasPeek by remember { mutableStateOf(false) }
+    /** A2UI 协议全屏场景：MoBridge.ui.a2ui 唤起，官方 A2UI-Android 引擎渲染 */
+    var a2uiSurface by remember { mutableStateOf<Pair<String, String>?>(null) }
+    /** 可视化弹窗：MoBridge.ui.popup 唤起，居中 Dialog 渲染 8 种原生组件 */
+    var nativePopup by remember { mutableStateOf<Pair<String, String>?>(null) }
     // 跨模式共享的对话历史（绑定：切换不丢上下文）
     val chatLog = remember { mutableStateListOf<ChatMsg>() }
+    // 对话历史持久化：启动恢复 + 每次变更落盘（重启不丢）
+    LaunchedEffect(Unit) {
+        store.loadChatLog().forEach { e ->
+            chatLog.add(ChatMsg(e.id, e.role, e.text, e.done, e.ts))
+        }
+    }
+    LaunchedEffect(chatLog.size, chatLog.lastOrNull()?.text?.length) {
+        if (chatLog.isNotEmpty()) {
+            store.saveChatLog(
+                chatLog.map { Triple(it.id, it.role, it.text) },
+                chatLog.map { it.done },
+                chatLog.map { it.ts },
+            )
+        }
+    }
     var showModeDialog by remember { mutableStateOf(false) }
     val chatSession = remember { mutableStateOf<ChatSession?>(null) }
 
@@ -211,16 +239,36 @@ fun GenScaffold(
                     val i = chatLog.indexOfFirst { it.id == id }
                     if (i >= 0) chatLog[i] = chatLog[i].copy(done = true)
                 },
-                onToolStart = { id, name, brief -> chatLog.add(ChatMsg(id, "tool", "$name($brief)…", false)) },
+                onToolStart = { id, name, brief -> chatLog.add(ChatMsg(id, "tool", "⚙ $name($brief)…", false)) },
                 onToolResult = { id, result ->
                     val i = chatLog.indexOfFirst { it.id == id }
                     if (i >= 0) chatLog[i] = chatLog[i].copy(
-                        text = chatLog[i].text.removeSuffix("…") + " → " + result.take(200),
+                        // ChatSession 已人类可读化（摘要+耗时），不再二次截断
+                        text = result,
                         done = true
                     )
                 },
                 onThinking = { s -> if (phase != Phase.Rendering) phaseDetail = s },
-                onError = { msg -> scope.launch { snackbar.showSnackbar(msg) } },
+                onError = { msg ->
+                    scope.launch {
+                        // 出错必须落在会话里：此前失败轮在聊天记录一片死寂，
+                        // 未完成的气泡永远停在"流式中"，用户只能看到一闪而过的 snackbar
+                        val i = chatLog.indexOfFirst { it.role == "assistant" && !it.done }
+                        if (i >= 0) chatLog[i] = chatLog[i].copy(done = true)
+                        chatLog.add(ChatMsg(
+                            java.util.UUID.randomUUID().toString().take(8), "error", msg, true))
+                        snackbar.showSnackbar(msg)
+                    }
+                },
+                onUiDetected = { html ->
+                    // 对话里生成的界面 → 画布渲染（对话面板让位，snackbar 召回）
+                    renderer.value?.replay(html)
+                    canvasPeek = true
+                    scope.launch {
+                        val r = snackbar.showSnackbar("界面已在画布生成", actionLabel = "返回对话")
+                        if (r == androidx.compose.material3.SnackbarResult.ActionPerformed) canvasPeek = false
+                    }
+                },
                 onAskPermission = { tool, briefArg, level ->
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                         kotlinx.coroutines.suspendCancellableCoroutine<Boolean> { cont ->
@@ -267,6 +315,21 @@ fun GenScaffold(
     // —— 原生组件：AI 页面经 MoBridge.ui.widget 唤起，Compose BottomSheet 渲染，结果回写页面 ——
     var nativeWidget by remember { mutableStateOf<Pair<String, String>?>(null) }
     nativeWidget?.let { (kind, payload) ->
+        if (kind == "popup") {
+            val k = runCatching { JSONObject(payload).optString("kind") }.getOrDefault("stat")
+            val d = runCatching { JSONObject(payload).optJSONObject("data")?.toString() }.getOrNull() ?: "{}"
+            nativePopup = k to d
+            nativeWidget = null
+            return@let
+        }
+        if (kind == "a2ui") {
+            // A2UI 协议消息：进全屏引擎，不进 BottomSheet
+            val sid = runCatching { JSONObject(payload).optJSONObject("createSurface")
+                ?.optString("surfaceId").orEmpty() }.getOrDefault("")
+            a2uiSurface = (sid.ifBlank { "main" }) to payload
+            nativeWidget = null
+            return@let
+        }
         NativeWidgetSheet(
             kind = kind, payload = payload,
             onDismiss = { nativeWidget = null },
@@ -368,11 +431,17 @@ fun GenScaffold(
             com.genui.app.render.RenderChannel.Kind.XML ->
                 plan.xml?.takeIf { it.isNotBlank() }?.let { NativeRender.Xml(it) }
             com.genui.app.render.RenderChannel.Kind.COMPOSE ->
-                plan.composeJson?.takeIf { it.isNotBlank() }?.let { NativeRender.Compose(it) }
+                plan.composeJson?.takeIf { it.isNotBlank() }?.let { json ->
+                    com.genui.app.render.A2uiBridge.route(json)
+                        ?.let { NativeRender.A2uiEmbedded(it) }
+                        ?: NativeRender.Compose(json)
+                }
             com.genui.app.render.RenderChannel.Kind.CANVAS ->
                 plan.canvasJson?.takeIf { it.isNotBlank() }?.let { NativeRender.Canvas(it) }
-            // HTML 宿主里 AI 只甩了裸代码块（没自己排版）→ 端上接管呈现
-            else -> plan.codeBlocks.takeIf { it.isNotEmpty() }?.let { NativeRender.Code(it) }
+            // ★ 交互根因修复：HTML 页一律不加原生覆盖层。
+            // 此前裸代码块也会触发全屏原生视图叠在 WebView 上——透明层看得见摸不着，
+            // 所有触摸被 Compose 层吞掉，HTML 交互全灭。代码块属于页面内容，留在页内渲染。
+            else -> null
         }
     }
 
@@ -385,8 +454,9 @@ fun GenScaffold(
     }
 
     // —— 浮层返回键：收起应用内弹层，而不是把用户踢回桌面（后注册者优先生效） ——
-    BackHandler(enabled = browsing || nativeWidget != null || permRequest.value != null || showModeDialog) {
+    BackHandler(enabled = browsing || nativeWidget != null || permRequest.value != null || showModeDialog || a2uiSurface != null) {
         when {
+            a2uiSurface != null -> a2uiSurface = null
             browsing -> browsing = false
             nativeWidget != null -> nativeWidget = null
             permRequest.value != null -> permRequest.value?.complete(false)
@@ -414,6 +484,9 @@ fun GenScaffold(
         building = true; chunkBytes = 0; bridgeCalls = 0; toolCalls = 0; ticks = 0
         startedAt = System.currentTimeMillis()
         timeline.clear()
+        canvasPeek = false
+        // 生成模式也留对话痕迹：本轮指令进对话流，Agent 的文字回答才有上下文可挂
+        chatLog.add(ChatMsg(GenStore.newId(), "user", prompt, true))
         // 新一轮生成：清掉上一屏的原生渲染层，避免它与流式内容叠加打架
         nativeRender = null
         phase = Phase.Thinking
@@ -448,6 +521,15 @@ fun GenScaffold(
                         phase = p; phaseDetail = d
                         if (tc > 0) toolCalls = tc
                         if (el > 0) lastElapsed = el
+                    }
+                    // 纯问答：文字进对话气泡，对话面板让位给用户看画布前先看到回答
+                    if (ev is com.genui.app.agent.AgentEvent.TextAnswer) {
+                        chatLog.add(ChatMsg(GenStore.newId(), "assistant", ev.text, true))
+                        canvasPeek = true
+                        scope.launch {
+                            val r = snackbar.showSnackbar("Agent 已作文字回答", actionLabel = "查看对话")
+                            if (r == androidx.compose.material3.SnackbarResult.ActionPerformed) canvasPeek = false
+                        }
                     }
                 }
             },
@@ -514,6 +596,12 @@ fun GenScaffold(
         phase = Phase.Thinking
         phaseDetail = "${provider.name} · ${provider.model}"
         val s = ensureSession()
+        // ★ 每轮从持久化 chatLog 重灌模型上下文：AI 与用户看到同一份历史
+        //   （重启/会话重建后不再"每次对话都是新的对话"；user 消息在下一步才入栈，无重复）
+        s.restoreHistory(
+            chatLog.filter { (it.role == "user" || it.role == "assistant") && it.done }
+                .map { it.role to it.text }
+        )
         chatLog.add(ChatMsg(GenStore.newId(), "user", prompt, true))
         s.addUser(prompt)
         s.run(provider)
@@ -868,13 +956,64 @@ fun GenScaffold(
                             onFirstPaint = {},
                             onPageTitle = {},
                             onBridgeCall = { bridgeCalls++ },
-                            onWidget = { kind, payload -> nativeWidget = kind to payload }
+                            onWidget = { kind, payload -> nativeWidget = kind to payload },
+                            onRenderIssue = { sample, errs -> renderIssue = sample to errs },
+                            onNarration = { text ->
+                                // 旁白归对话流：画布只留界面内容
+                                chatLog.add(ChatMsg(GenStore.newId(), "assistant", text, true))
+                            },
+                            onHealth = { s ->
+                                timeline.add(Kind.RESULT, "页面体检", s)
+                            }
                         )
                         wv.loadUrl("about:blank")
                     }
                 },
                 modifier = Modifier.fillMaxSize()
             )
+
+            // —— 渲染收尾体检提示条：花括号残留 / JS 错误时给 AI 一键定向修复 ——
+            val issue = renderIssue
+            if (issue != null) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    Text(
+                        "⚠ 渲染自检未通过" + (if (issue.first.isNotEmpty()) "：" + issue.first.first() else ""),
+                        color = GenTheme.Amber, fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        "忽略",
+                        color = GenTheme.Dim, fontSize = 11.sp,
+                        modifier = Modifier
+                            .clickable { renderIssue = null }
+                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                    )
+                    Text(
+                        "让 AI 修复",
+                        color = GenTheme.Amber, fontSize = 11.sp,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                        modifier = Modifier
+                            .clickable {
+                                val sample = issue.first; val errs = issue.second
+                                renderIssue = null
+                                val p = buildString {
+                                    append("画布渲染自检未通过：页面上仍残留未挂载的模板占位符")
+                                    if (sample.isNotEmpty()) append("（如 " + sample.joinToString("、") + "）")
+                                    if (errs.isNotEmpty()) append("；页面 JS 报错：" + errs.joinToString("；"))
+                                    append("。常见原因是脚本在挂载点之前执行，或运行时 CDN 加载失败（端上可用 /assets/runtimes/ 本地回落）。")
+                                    append("请只针对以上问题输出修正后的完整页面，其余内容保持不变。")
+                                }
+                                scope.launch { if (chatMode == "agent") chat(p) else generate(p) }
+                            }
+                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                    )
+                }
+            }
 
             // —— 原生渲染层 ——
             // AI 声明了 xml / compose 通道时，画布交给真实原生渲染。
@@ -897,6 +1036,7 @@ fun GenScaffold(
                                 when (native) {
                                     is NativeRender.Xml -> "◧ 原生布局"
                                     is NativeRender.Compose -> "◨ Compose"
+                                    is NativeRender.A2uiEmbedded -> "◨ A2UI 引擎"
                                     is NativeRender.Canvas -> "◩ GenCanvas"
                                     is NativeRender.Code -> "▤ 代码视图"
                                 },
@@ -914,6 +1054,14 @@ fun GenScaffold(
                         Spacer(Modifier.height(10.dp))
                         when (native) {
                             is NativeRender.Xml -> XmlNativeView(native.xml)
+                            is NativeRender.A2uiEmbedded -> A2uiEmbeddedView(
+                                message = native.message,
+                                onEvent = { payload ->
+                                    val js = "(function(){try{window.dispatchEvent(new MessageEvent('mo:a2ui',{data:" +
+                                        JSONObject.quote(payload) + "}))}catch(e){}})()"
+                                    webRef.value?.evaluateJavascript(js, null)
+                                }
+                            )
                             is NativeRender.Compose -> ComposeDescRenderer.Render(native.json) { action ->
                                 // 原生控件的事件回传给 AI 页面：派发 mo:compose 事件
                                 renderer.value?.dispatchComposeAction(action)
@@ -938,14 +1086,68 @@ fun GenScaffold(
             }
 
             // —— Agent 标准对话面板：在 Agent 模式下覆盖在画布上方（画布 WebView 不销毁，保持两种模式绑定） ——
-            if (chatMode == "agent") {
+            if (chatMode == "agent" && !canvasPeek) {
                 ChatPanel(
                     messages = chatLog,
-                    modifier = Modifier.fillMaxSize().background(GenTheme.Screen)
+                    modifier = Modifier.fillMaxSize().background(GenTheme.Screen),
+                    onCardAction = { action ->
+                        // 对话卡按钮 → 回灌 Agent 会话继续处理（此前是 no-op 死按钮）
+                        scope.launch { chat("（用户点击了卡片按钮：「$action」，请基于当前上下文继续处理）") }
+                    },
                 )
             }
 
-            // —— WebView 生命周期释放 ——
+            // —— 可视化弹窗：ui.popup 唤起，8 种原生组件居中 Dialog ——
+    nativePopup?.let { (kind, data) ->
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { nativePopup = null },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Column(
+                Modifier.fillMaxWidth(0.92f)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(GenTheme.Panel)
+                    .border(0.5.dp, GenTheme.Line, RoundedCornerShape(14.dp))
+                    .padding(16.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("可视化弹窗", color = GenTheme.Amber, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "关闭", color = GenTheme.Dim, fontSize = 12.sp,
+                        modifier = Modifier.clickable { nativePopup = null }.padding(4.dp),
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                WidgetContent(
+                    kind, runCatching { JSONObject(data) }.getOrDefault(JSONObject()),
+                    onResult = { result ->
+                        val js = "(function(){try{window.dispatchEvent(new MessageEvent('mo:widget',{data:" +
+                            JSONObject.quote(result.toString()) + "}))}catch(e){}})()"
+                        webRef.value?.evaluateJavascript(js, null)
+                        nativePopup = null
+                    },
+                )
+            }
+        }
+    }
+
+    // —— A2UI 协议全屏场景（官方 A2UI-Android 引擎） ——
+    a2uiSurface?.let { (sid, msg) ->
+        A2uiHost(
+            surfaceId = sid, message = msg,
+            onEvent = { _, _, payload ->
+                // A2UI 组件事件 → mo:a2ui MessageEvent 回传 AI 页面；
+                // 页面 JS 监听后用 MoBridge.ui.a2ui 发 updateDataModel 更新数据
+                val js = "(function(){try{window.dispatchEvent(new MessageEvent('mo:a2ui',{data:" +
+                    JSONObject.quote(payload) + "}))}catch(e){}})()"
+                webRef.value?.evaluateJavascript(js, null)
+            },
+            onDismiss = { a2uiSurface = null }
+        )
+    }
+
+    // —— WebView 生命周期释放 ——
             // WebView 即使离开界面也会继续跑 JS 定时器、持有网络请求与 Context，
             // 不主动销毁就是内存泄漏（长会话反复切换时尤其明显）。
             // 离开组合时：停加载 → 清历史 → 解绑视图 → destroy，并清空引用。
@@ -1100,6 +1302,8 @@ private class RunSlot {
     var idx = -1
     /** 当前正在更新的绘制条目索引（Painting / RenderProgress 原地复用） */
     var paintIdx = -1
+    /** 当前正在更新的思考条目索引（Thinking 原地复用，其他事件到来时收口） */
+    var thinkIdx = -1
 }
 
 private inline fun applyEvent(
@@ -1108,6 +1312,12 @@ private inline fun applyEvent(
     slot: RunSlot,
     report: (Phase, String, Int, Long) -> Unit
 ) {
+    // 思考条目合并：Thinking 事件高频到达（曾每 token 一条，刷出 534 条单字碎片），
+    // 原地更新同一条；任何其他事件到来时把思考条目定格收口
+    if (ev !is com.genui.app.agent.AgentEvent.Thinking && slot.thinkIdx >= 0) {
+        tl.update(slot.thinkIdx, false)
+        slot.thinkIdx = -1
+    }
     when (ev) {
         is com.genui.app.agent.AgentEvent.Started -> {
             slot.idx = -1
@@ -1115,7 +1325,8 @@ private inline fun applyEvent(
             report(Phase.Thinking, "${ev.provider} · ${ev.model}", 0, 0L)
         }
         is com.genui.app.agent.AgentEvent.Thinking -> {
-            tl.add(Kind.THINK, ev.note, running = true)
+            if (slot.thinkIdx >= 0) tl.update(slot.thinkIdx, true, text = ev.note)
+            else slot.thinkIdx = tl.add(Kind.THINK, ev.note, running = true)
             report(Phase.Thinking, ev.note, 0, 0L)
         }
         is com.genui.app.agent.AgentEvent.Decided -> {
@@ -1136,7 +1347,9 @@ private inline fun applyEvent(
         }
         is com.genui.app.agent.AgentEvent.ToolFinished -> {
             if (slot.idx >= 0) {
-                tl.update(slot.idx, false, text = "${ev.tool} · ${ev.ms}ms", detail = ev.summary)
+                tl.update(slot.idx, false,
+                    text = "${ev.tool} · ${com.genui.app.agent.ToolSummarize.fmtMs(ev.ms)}",
+                    detail = ev.summary)
                 slot.idx = -1
             } else {
                 tl.add(Kind.RESULT, "${ev.tool} · ${ev.ms}ms", ev.summary)
@@ -1165,6 +1378,14 @@ private inline fun applyEvent(
             // 体量心跳：并入绘制条目，不新增，避免与语义进度重复
             if (slot.paintIdx >= 0) tl.update(slot.paintIdx, true, detail = "${ev.bytes / 1024}KB 已写入")
             report(Phase.Rendering, "${ev.bytes / 1024}KB", 0, 0L)
+        }
+        is com.genui.app.agent.AgentEvent.Plan -> {
+            tl.add(Kind.PLAN, "规划", ev.text, running = false)
+            report(Phase.Thinking, "已输出规划", 0, 0L)
+        }
+        is com.genui.app.agent.AgentEvent.TextAnswer -> {
+            tl.add(Kind.DONE, "Agent 文字回答", "${ev.text.length} 字 · 未渲染界面")
+            report(Phase.Done, "已回答（见对话）", 0, 0L)
         }
         is com.genui.app.agent.AgentEvent.Finished -> {
             // 收尾：把仍在 running 的绘制条目定格为完成，否则它永远转圈
@@ -1260,6 +1481,11 @@ private fun setupHistoryWebView(wv: WebView) {
             view: WebView?,
             request: WebResourceRequest?
         ): WebResourceResponse? = request?.url?.let { assetLoader.shouldInterceptRequest(it) }
+
+        override fun onPageFinished(view: WebView?, url: String?) {
+            // 触摸兜底：历史页同样注入点击合成器 + cursor:pointer（幂等）
+            view?.evaluateJavascript(TAP_NORMALIZER_JS, null)
+        }
     }
 }
 
@@ -1357,6 +1583,8 @@ private fun HistoryBrowser(
     onExit: () -> Unit
 ) {
     var pos by remember { mutableStateOf(maxOf(0, pages.lastIndex)) }
+    val histWv = remember { java.util.concurrent.atomic.AtomicReference<WebView?>(null) }
+    val context = androidx.compose.ui.platform.LocalContext.current
     Box(Modifier.fillMaxSize().background(GenTheme.Screen)) {
         if (pages.isEmpty()) {
             Column(
@@ -1380,27 +1608,14 @@ private fun HistoryBrowser(
                 factory = { c ->
                     WebView(c).also { wv ->
                         setupHistoryWebView(wv)
+                        histWv.set(wv)
                         wv.loadDataWithBaseURL("https://genui.local/", page.html, "text/html", "UTF-8", null)
                     }
                 },
                 modifier = Modifier.fillMaxSize()
             )
         }
-        // 全屏手势层：覆盖 WebView，捕获上下滑动翻页（浏览态不交互，正好）
-        Box(
-            Modifier.fillMaxSize().pointerInput(Unit) {
-                var acc = 0f
-                detectVerticalDragGestures(
-                    onDragStart = { _ -> acc = 0f },
-                    onVerticalDrag = { _, d -> acc += d },
-                    onDragEnd = {
-                        val th = 80.dp.toPx()
-                        if (acc < -th && pos > 0) pos--
-                        else if (acc > th && pos < pages.lastIndex) pos++
-                    }
-                )
-            }
-        ) {}
+        // （已移除全屏手势层：它盖在 WebView 上吃掉一切点击——历史页也要能交互）
         // 顶部信息条
         Row(
             Modifier.align(Alignment.TopCenter).fillMaxWidth()
@@ -1413,24 +1628,160 @@ private fun HistoryBrowser(
                 "✕", color = GenTheme.Text, fontSize = 15.sp,
                 modifier = Modifier.clickable { onExit() }.padding(6.dp)
             )
-            Spacer(Modifier.width(10.dp))
+            Text(
+                "‹", color = GenTheme.Amber, fontSize = 17.sp,
+                modifier = Modifier.clickable { if (pos > 0) pos-- }.padding(horizontal = 8.dp)
+            )
             Text(
                 "${pos + 1} / ${pages.size}",
                 color = GenTheme.Amber, fontSize = 11.sp, fontFamily = FontFamily.Monospace
             )
-            Spacer(Modifier.width(10.dp))
+            Text(
+                "›", color = GenTheme.Amber, fontSize = 17.sp,
+                modifier = Modifier.clickable { if (pos < pages.lastIndex) pos++ }.padding(horizontal = 8.dp)
+            )
+            Spacer(Modifier.width(8.dp))
             Text(
                 page.title, color = GenTheme.Dim, fontSize = 11.sp, maxLines = 1,
                 modifier = Modifier.weight(1f)
             )
+            Text(
+                "🩺", fontSize = 13.sp,
+                modifier = Modifier.clickable {
+                    histWv.get()?.evaluateJavascript(
+                        "JSON.stringify(window.__genuiTouch||{t:0,c:0,e:[]})", null
+                    )
+                    android.widget.Toast.makeText(
+                        context, "触诊探针已注入 · 点按钮看水波/高亮", android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }.padding(horizontal = 6.dp)
+            )
         }
         // 底部操作提示
         Text(
-            "↑ 上滑看更早    ↓ 下滑看更新    ✕ 退出",
+            "‹ › 翻页    ✕ 退出    🩺 页面自检",
             color = GenTheme.Dim, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 18.dp)
                 .background(GenTheme.Panel.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
                 .padding(horizontal = 12.dp, vertical = 6.dp)
         )
+    }
+}
+
+
+/**
+ * A2UI 协议全屏场景宿主：官方 A2UI-Android 引擎（vendored，见 org/a2ui/VENDORED.md）。
+ * 消息经 MoBridge.ui.a2ui 进入，支持 createSurface / updateComponents / updateDataModel 流式更新。
+ */
+@Composable
+private fun A2uiHost(
+    surfaceId: String,
+    message: String,
+    onEvent: (surfaceId: String, actionName: String, payload: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val renderer = org.a2ui.compose.rendering.rememberA2UIRenderer()
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    LaunchedEffect(message) {
+        // 关键：不设 ActionHandler，SDK 把所有组件交互静默丢弃 —— UI 就成了死的
+        renderer.setActionHandler(object : org.a2ui.compose.rendering.ActionHandler {
+            override fun onAction(sid: String, actionName: String, context: Map<String, Any>) {
+                val payload = runCatching {
+                    JSONObject()
+                        .put("surfaceId", sid)
+                        .put("action", actionName)
+                        .put("context", JSONObject(context))
+                        .toString()
+                }.getOrDefault("{}")
+                onEvent(sid, actionName, payload)
+            }
+
+            override fun openUrl(url: String) {
+                runCatching {
+                    ctx.startActivity(
+                        android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                    )
+                }
+            }
+
+            override fun showToast(message: String) {
+                android.widget.Toast.makeText(ctx, message, android.widget.Toast.LENGTH_SHORT).show()
+            }
+        })
+        runCatching { renderer.processMessage(message) }
+    }
+    Box(Modifier.fillMaxSize().background(GenTheme.Screen)) {
+        if (renderer.surfaces.containsKey(surfaceId)) {
+            renderer.renderSurface(surfaceId)()
+        } else {
+            Text(
+                "A2UI 场景加载中…",
+                color = GenTheme.Dim, fontSize = 13.sp,
+                modifier = Modifier.align(Alignment.Center)
+            )
+        }
+        Text(
+            "✕ 关闭",
+            color = GenTheme.Amber, fontSize = 13.sp,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .clickable { onDismiss() }
+                .padding(horizontal = 14.dp, vertical = 10.dp)
+        )
+    }
+}
+
+
+/**
+ * A2UI 嵌入式宿主：原生组件树含官方引擎专属类型时整树接管（嵌在画布原生渲染槽内）。
+ * 事件经 ActionHandler → mo:a2ui MessageEvent 回传 AI 页面形成闭环。
+ */
+@Composable
+private fun A2uiEmbeddedView(message: String, onEvent: (String) -> Unit) {
+    val renderer = org.a2ui.compose.rendering.rememberA2UIRenderer()
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    LaunchedEffect(message) {
+        renderer.setActionHandler(object : org.a2ui.compose.rendering.ActionHandler {
+            override fun onAction(sid: String, actionName: String, context: Map<String, Any>) {
+                val payload = runCatching {
+                    JSONObject()
+                        .put("surfaceId", sid)
+                        .put("action", actionName)
+                        .put("context", JSONObject(context))
+                        .toString()
+                }.getOrDefault("{}")
+                onEvent(payload)
+            }
+
+            override fun openUrl(url: String) {
+                runCatching {
+                    ctx.startActivity(
+                        android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                    )
+                }
+            }
+
+            override fun showToast(message: String) {
+                android.widget.Toast.makeText(ctx, message, android.widget.Toast.LENGTH_SHORT).show()
+            }
+        })
+        runCatching { renderer.processMessage(message) }
+    }
+    val sid = remember(message) {
+        runCatching {
+            JSONObject(message).optJSONObject("updateComponents")?.optString("surfaceId").orEmpty()
+        }.getOrDefault("")
+    }
+    Box(Modifier.fillMaxSize()) {
+        if (sid.isNotBlank() && renderer.surfaces.containsKey(sid)) {
+            renderer.renderSurface(sid)()
+        } else {
+            Text(
+                "A2UI 引擎加载中…",
+                color = GenTheme.Dim, fontSize = 12.sp,
+                modifier = Modifier.align(Alignment.Center)
+            )
+        }
     }
 }

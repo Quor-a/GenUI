@@ -344,6 +344,10 @@ object RuntimeRegistry {
         append("</style>")
     }
 
+    /** 全部运行时/字体资产文件名（CDN 失败回落映射用） */
+    fun allAssetFileNames(): List<String> =
+        (all.flatMap { it.files } + fonts.map { it.second }).distinct()
+
     /**
      * 启动自检：校验 assets 里文件确实存在。
      * 返回缺失清单（空 = 全部正常）。只读一次，开销可忽略。

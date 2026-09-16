@@ -204,6 +204,7 @@ private fun TimelineRow(
 /** 每种事件的语义色 + 字形标识 */
 private fun kindStyle(e: ThinkingTimeline.Entry): Pair<Color, Glyph> = when (e.kind) {
     ThinkingTimeline.Kind.START -> GenTheme.Amber to Glyph.SPARK
+    ThinkingTimeline.Kind.PLAN -> Color(0xFFD89A4A) to Glyph.SPARK
     ThinkingTimeline.Kind.THINK -> GenTheme.AmberDim to Glyph.BRAIN
     ThinkingTimeline.Kind.DECIDE -> GenTheme.Amber to Glyph.FORK
     ThinkingTimeline.Kind.TOOL -> Color(0xFF5FA8A0) to Glyph.WRENCH
@@ -221,6 +222,7 @@ private fun kindLabel(k: ThinkingTimeline.Kind): String = when (k) {
     ThinkingTimeline.Kind.START -> "开 始"
     ThinkingTimeline.Kind.THINK -> "思 考"
     ThinkingTimeline.Kind.DECIDE -> "决 策"
+    ThinkingTimeline.Kind.PLAN -> "规 划"
     ThinkingTimeline.Kind.TOOL -> "调 用"
     ThinkingTimeline.Kind.AUTH -> "授 权"
     ThinkingTimeline.Kind.DENIED -> "拒 绝"

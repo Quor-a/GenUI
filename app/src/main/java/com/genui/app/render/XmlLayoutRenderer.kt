@@ -72,26 +72,32 @@ object XmlLayoutRenderer {
     // ---------- XML 解析 ----------
 
     private fun parse(xml: String): Element {
-        val dbf = DocumentBuilderFactory.newInstance().apply {
-            // 关键修正：之前用 disallow-doctype-decl=true 硬拒任何 DOCTYPE，
-            // 但 AI 生成原生布局时几乎必定带 <!DOCTYPE html>，于是每次都抛
-            // "disallow-doctype-decl" 解析异常 → 画布只剩红字"原生布局渲染失败"。
-            //
-            // 正确做法：**允许 DOCTYPE**，但把"外部实体"这条 XXE 攻击面彻底关死：
-            //   - external-general-entities / external-parameter-entities = false（不解析 SYSTEM/PUBLIC 外部实体）
-            //   - load-external-dtd = false（不拉取外部 DTD 文件）
-            //   - isExpandEntityReferences = false
-            // 这样 <!DOCTYPE html> 这类无害声明能正常解析，而 XXE 风险被堵死。
-            setFeature("http://apache.org/xml/features/disallow-doctype-decl", false)
-            setFeature("http://xml.org/sax/features/external-general-entities", false)
-            setFeature("http://xml.org/sax/features/external-parameter-entities", false)
-            setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
-            isExpandEntityReferences = false
-            isNamespaceAware = false
+        val dbf = DocumentBuilderFactory.newInstance()
+        // 安全开关逐个尝试。真机教训：不同 ROM 的 JAXP 实现支持的 feature 集不同，
+        // setFeature 认不得 URI 会直接抛 SAXNotRecognizedException —— 以前整个
+        // apply 块一口气设，一台机器认不得就全军覆没（画布只剩"XML 解析失败"）。
+        // 现在认就设、不认就跳过；攻击面开关没设全时用剥 DOCTYPE 兜底。
+        var hardened = true
+        for ((f, v) in SAFE_FEATURES) {
+            try {
+                dbf.setFeature(f, v)
+            } catch (t: Throwable) {
+                hardened = false
+            }
         }
+        // 标准属性 setter 在部分实现上同样会抛（如 setXIncludeAware），一并容错
+        runCatching { dbf.isExpandEntityReferences = false }
+        runCatching { dbf.isNamespaceAware = false }
+        runCatching { dbf.isXIncludeAware = false }.onFailure { hardened = false }
+
         var src = xml.trim().trimStart('\uFEFF')
         // 仍可能顺手包一层 Markdown 代码围栏（```xml ... ```），那不是合法 XML，剥掉。
         src = stripLeadingFence(src)
+        // AI 极爱写 &nbsp; &mdash; &copy; 等 HTML 命名实体 —— XML 只认五个预定义实体，
+        // 未定义实体会直接抛 "entity referenced but not declared" 中断解析，先清洗。
+        src = sanitizeEntities(src)
+        // 攻击面开关没设全的实现上，DOCTYPE 本身就是外部实体入口 —— 剥掉保安全
+        if (!hardened) src = stripDoctype(src)
         // AI 常忘记 XML 声明；补一个，避免解析器报 "prolog 中不允许内容"
         val body = if (src.startsWith("<?xml")) src else "<?xml version=\"1.0\" encoding=\"utf-8\"?>$src"
         val doc = dbf.newDocumentBuilder().parse(ByteArrayInputStream(body.toByteArray(Charsets.UTF_8)))
@@ -567,4 +573,40 @@ object XmlLayoutRenderer {
             textSize = 13f
             setPadding(32, 32, 32, 32)
         }
+
+    /**
+     * 命名实体 → 真实字符。注意：amp/lt/gt/quot/apos 这五个是 XML 预定义实体，
+     * 解析器原生支持且 **必须保留原样** —— 把 &amp; 换成 & 反而会把合法 XML
+     * 弄成非法（未闭合实体引用）。这里只清洗 XML 不认识的那部分。
+     */
+    private val XML5 = setOf("amp", "lt", "gt", "quot", "apos")
+        private val ENT = mapOf(
+            "nbsp" to "\u00A0", "mdash" to "—", "ndash" to "–", "times" to "×",
+            "copy" to "©", "reg" to "®", "hellip" to "…", "middot" to "·",
+            "bull" to "•", "deg" to "°", "plusmn" to "±", "micro" to "µ",
+            "sect" to "§", "para" to "¶", "euro" to "€", "pound" to "£", "yen" to "¥",
+            "cent" to "¢", "trade" to "™", "ldquo" to "\u201C", "rdquo" to "\u201D",
+            "lsquo" to "\u2018", "rsquo" to "\u2019", "laquo" to "«", "raquo" to "»",
+            "larr" to "←", "rarr" to "→", "uarr" to "↑", "darr" to "↓",
+            "frac12" to "½", "sup2" to "²", "sup3" to "³",
+        )
+
+        /** 未定义/HTML 命名实体 → 真实字符；不认识的直接吞掉，绝不让它中断解析 */
+        private fun sanitizeEntities(s: String): String =
+            s.replace(Regex("&([a-zA-Z]+[0-9]*);")) { m ->
+                val n = m.groupValues[1]
+                if (n in XML5) m.groupValues[0] else ENT[n] ?: ""
+            }
+
+        /** 安全开关清单：允许 DOCTYPE，但外部实体 / XInclude / 外部 DTD 一律关死 */
+        private val SAFE_FEATURES = listOf(
+            "http://apache.org/xml/features/disallow-doctype-decl" to false,
+            "http://xml.org/sax/features/external-general-entities" to false,
+            "http://xml.org/sax/features/external-parameter-entities" to false,
+            "http://apache.org/xml/features/nonvalidating/load-external-dtd" to false,
+        )
+
+        /** 兜底：安全开关设不上时剥掉 DOCTYPE（含内部子集），不留外部实体入口 */
+        private fun stripDoctype(s: String): String =
+            s.replace(Regex("(?is)<!DOCTYPE\\b.*?(\\[[^\\]]*\\])?\\s*>"), "")
 }

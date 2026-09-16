@@ -131,7 +131,14 @@ object MoBridgeHost {
     // ---- 原生组件 + 标题（唯一一次定义 ui） ----
     ui: {
       title:  function(text){ try{ document.title = text; }catch(e){} return noop(); },
-      widget: function(kind, data){ return call('ui.widget', {kind:kind, data:data||{}}); }
+      widget: function(kind, data){ return call('ui.widget', {kind:kind, data:data||{}}); },
+      // 动态组件注册：AI 现场写组件模板（JSON 组件树 + {{prop}} 占位 + {"slot":true} 插槽），
+      // 注册后在组件树里以 {"type":"name", ...} 直接复用 —— 组件面由 AI 按需生长
+      component: function(name, template){ return call('ui.component', {name:name, template:template||{}}); },
+      // A2UI 协议通道：官方 A2UI-Android 引擎渲染（createSurface/updateComponents/updateDataModel）
+      a2ui: function(message){ return call('ui.a2ui', {message:message||''}); },
+      // 可视化弹窗：8 种原生组件居中弹出（数据协议同 ui.widget）
+      popup: function(kind, data){ return call('ui.popup', {kind:kind, data:data||{}}); }
     }
   };
 })();
@@ -356,6 +363,37 @@ class MoBridgeDispatcher(
                 JSONObject().put("ok", true).put("name", name).put("where", f.absolutePath)
                     .put("hint", "Android 10 以下导出到应用导出目录（可通过系统文件管理器访问 Android/data）")
             }
+        }
+
+        "ga.exec" -> {
+            // 结构性真实交互：data-ga 表达式由端上执行，AI 不写 JS 也能有真按钮
+            val expr = a.optString("expr")
+            val out = try { GaActions.exec(context, expr) } catch (t: Throwable) {
+                JSONObject().put("ok", false).put("error", t.message ?: "执行失败")
+            }
+            out
+        }
+
+        "ui.popup" -> {
+            // 可视化弹窗：居中 Dialog 渲染原生组件（非 BottomSheet）
+            val kind = a.optString("kind")
+            val data = a.optJSONObject("data")?.toString() ?: a.optString("data", "{}")
+            webView.post { onWidget("popup", JSONObject().put("kind", kind).put("data", data).toString()) }
+            JSONObject().put("ok", true)
+        }
+
+        "ui.a2ui" -> {
+            // A2UI 协议消息 → 全屏原生场景（官方 A2UI-Android 引擎）
+            val msg = a.optString("message")
+            if (msg.isNotBlank()) webView.post { onWidget("a2ui", msg) }
+            JSONObject().put("ok", true)
+        }
+
+        "ui.component" -> {
+            // AI 动态组件注册：写模板 → 注册 → 组件树复用 → 原生渲染（GenUI 路线）
+            val name = a.optString("name")
+            val template = a.optJSONObject("template")?.toString() ?: "{}"
+            com.genui.app.render.DynamicComponents.register(name, template)
         }
 
         "ui.widget" -> {

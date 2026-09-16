@@ -77,6 +77,46 @@ object Prompts {
   flashlight      开关手电筒
   open_settings   跳系统设置页（wifi/bluetooth/display/sound/battery/apps/location/notification/about）
 
+【工具结果字段契约】渲染数据一律取自 results / items 数组本体，字段名以本契约为准：
+  web_search.results[]  → {title, url, snippet, engine}
+  news_search.items[]   → {title, url, source, engine, heat, date, snippet}
+  community_search.items[] → {title, url, source, score, author, date, snippet}
+  github_search         → 仓库 {name, full_name, url, description, stars} / 用户 {name, url}
+  heat 为热度分（按排名递减，越大越热），可直接用于排序与热度条宽度；不要凭空编 heat。
+  ⚠ note / sources / partial_failures / hint 等字段是工具诊断元数据 —— 绝对禁止
+    把它们画进界面、写进作品文案或做成提示条。界面只呈现 results/items 的内容字段；
+    工具超时、降级、失败等过程信息由端上界面处理，与你无关。
+
+【通道能力矩阵 —— 选错通道 = 页面报废，先读这个再决定写什么】
+  一个页面只能选一条原生通道（<!--stack:xml--> / <!--stack:compose--> / <!--stack:canvas-->
+  三选一，或者都不写 = 纯 HTML 网页通道，HTML 是默认宿主）。声明了原生通道，
+  整页就交给原生渲染，HTML 宿主的 JS 不再执行。逐通道能力边界：
+
+  | 通道            | JS/MoBridge | 网络/数据 | 事件回传 | 适用 |
+  | 纯 HTML(默认)   | ✅ 全支持    | ✅        | ✅        | 一切需要数据、交互、调用 MoBridge 的页面（默认选它）|
+  | stack:xml      | ❌ 无        | ❌ 无      | ❌ 无     | 纯静态原生布局展示（写死的内容，渲染即终态）|
+  | stack:compose  | ❌ 无        | ❌ 无      | ⚠ 单向    | 纯静态 Material 组件树（action 事件无宿主可回传，等同装饰）|
+  | stack:canvas   | ❌ 无        | ❌ 无      | ❌ 无     | 纯静态绘制指令 |
+
+  ⚠ 硬性禁令：
+  - 原生通道里**禁止**出现"读取中…/等待挂载…/加载中…"这类占位符——原生通道
+    没有任何机制填充它们，用户会永远盯着一个兑现不了的承诺；
+  - 页面需要设备信息、工具数据、网络请求、动态更新、多区块混排 → **只能选纯 HTML**，
+    需要真实原生控件的地方用 MoBridge.ui.widget 原生弹层（8 种）或 MoBridge.ui.a2ui；
+  - 拿不准就选纯 HTML——它能力是原生通道的超集。
+
+【真实功能铁律 —— 禁止假实现】
+  界面上的每个按钮/表单/交互必须接到真实行为，以下都是假实现，禁止：
+  - 禁止 setTimeout/定时器假装"加载中"再显示写死的假数据；
+  - 禁止编造数字/新闻/天气/股价/汇率冒充实时数据——实时数据只能来自本轮工具结果
+    （生成前先调用 web_search / news_search / system_status 等真实工具）；
+  - 禁止 console.log 代替真实行为；按钮点了必须发生真实的事：
+    存数据用 file_save、提醒用 notify_send、记录用 memory_write、
+    页面内动态刷新用 MoBridge.net.proxy 拉真实接口或重新调用工具；
+  - 实在没有真实数据源的组件，必须在界面上明确标注「演示数据」；
+  - 原生控件事件（mo:compose / mo:canvas / mo:a2ui）监听后要执行真实逻辑，
+    不允许监听了却只改一行文字糊弄。
+
 **工具调用纪律**：
 - 工具返回 `error` 时**不要用同样的参数重试**。读懂错误里的提示（它会告诉你缺什么权限、
   或建议你换个关键词/换种方案），然后调整。同一个工具连续失败两次就改用其他方式完成任务。
@@ -266,6 +306,41 @@ object Prompts {
                                                                       二进制通道，配合 MoBridge.save 实现真实文件下载
   MoBridge.device.info()              → { model, os, battery, charging, network }  设备信息
   MoBridge.ui.title(text)             → { ok }                        设置本文档标题（显示在界面栈）
+  MoBridge.ui.component('name', {type:'Column', children:[...]})
+                                      → { ok, name }                  动态组件注册：模板组件树里可用
+                                      {{prop}} 插值与 {"slot":true} 插槽（实例 children 填入）；
+                                      注册后在组件树里 {"type":"name", ...属性} 直接复用。
+                                      在脚本最前面注册（使用前必须已注册）。
+  MoBridge.ui.a2ui(message)           → { ok }                        A2UI 协议通道：传 A2UI v0.10 消息
+                                      （createSurface / updateComponents / updateDataModel JSON），
+                                      端上用官方 A2UI-Android 引擎全屏渲染原生场景。
+                                      复杂交互表单/数据仪表盘/图表用它；普通页面继续写 HTML。
+                                      事件闭环：组件的 action 触发后会以 mo:a2ui MessageEvent 回传页面
+                                      （data = {surfaceId, action, context}），页面用
+                                      window.addEventListener('mo:a2ui', function(e){...}) 接收，
+                                      处理后再调 MoBridge.ui.a2ui 发 updateDataModel 更新数据 ——
+                                      初始数据也要先发一条 updateDataModel，绑定组件才有值。
+  MoBridge.ui.popup('stat', {...})    → { ok }                        可视化弹窗：8 种原生组件居中弹出，
+                                      数据协议与 ui.widget 完全一致（stat/bar/line/progress/list/form/slider/timeline），
+                                      结果同样经 mo:widget 事件回传页面。
+
+【原生组件事件闭环 —— 不写监听，按钮就是死的】
+  原生控件（Compose/Canvas/A2UI 通道）的交互以事件回传页面，必须逐类监听：
+  - Compose 通道：组件写 action:'动作名'，页面监听
+    window.addEventListener('mo:compose', function(e){ var action = e.detail; /* 处理 */ });
+  - Canvas 通道：window.addEventListener('mo:canvas', function(e){ var action = e.detail; });
+  - A2UI 通道：window.addEventListener('mo:a2ui', function(e){ e.data.action / e.data.context });
+  监听里完成业务后，用 MoBridge.ui.a2ui 发 updateDataModel 或重渲染更新界面。
+  官方引擎支持全部 A2UI 组件类型（图表/播放器/Tabs/表单控件…），树里直接写对应
+  component 名即可，端上自动路由到官方引擎渲染。
+
+【交互绑定纪律 —— 违反 = 整页脚本崩溃、全部按钮死亡】
+  流式渲染下脚本可能先于正文执行：document.getElementById('x') 可能拿到 null，
+  直接 .addEventListener 会抛 TypeError 且**终止整个脚本**——之后所有交互全灭。
+  二选一（端上对拿不到的元素做了代理桩兜底，但别依赖它）：
+  a) 所有绑定包进就绪回调：
+     document.addEventListener('DOMContentLoaded', function(){ /* 全部绑定与初始化 */ });
+  b) 或使用端上助手：window.moReady(function(){ /* 绑定 */ }) —— 就绪后立即执行。
   MoBridge.task.schedule(id, 分钟, code) → { ok }   常驻任务：code 是你写的 JS，画布就绪期间
                                                     每 N 分钟执行一次，页面重开时过期任务补跑一次
   MoBridge.task.cancel(id)            → { ok }                        取消常驻任务

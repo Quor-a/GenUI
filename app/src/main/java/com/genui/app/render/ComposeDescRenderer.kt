@@ -58,6 +58,12 @@ TextField           输入框：label，value(初值)，action(提交事件名)�
 Switch              开关：checked(bool)，label，action
 Slider              滑杆：min / max / value / action
 Chip                标签：text / selected(bool) / action
+
+A2UI 兼容            组件树也可用 A2UI 协议组件名（heading/image/checkbox/list/select 等），
+                    端上自动映射为上述原生组件——按 Google A2UI 协议写即可，无需转换。
+自定义组件           先 MoBridge.ui.component('name', 模板树) 注册（模板支持 {{prop}} 插值
+                    与 {"slot":true} 插槽），组件树里 {"type":"name"} 直接复用——
+                    组件清单不预置，由 AI 按需现场生长。
 """.trimIndent()
 
     /**
@@ -70,7 +76,8 @@ Chip                标签：text / selected(bool) / action
         onAction: (name: String) -> Unit = {}
     ) {
         val tree = remember(desc) {
-            runCatching { JSONObject(desc) }.getOrNull()
+            // 先过动态组件展开（未知类型命中注册表 → 模板实例化），再解析渲染
+            runCatching { JSONObject(com.genui.app.render.DynamicComponents.expandTree(desc)) }.getOrNull()
         }
         if (tree == null) {
             Text(

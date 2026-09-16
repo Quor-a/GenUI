@@ -157,3 +157,23 @@ Android Studio 打开本项目（需 JDK 17）→ Sync → Run
 真实控件。Compose 通道用"组件树描述"而非源码，是因为声明式 UI 的本质就是
 组件树 + 属性，数据化后能 1:1 映射到真组件，既避开了编译又拿到了原生渲染。
 
+
+
+---
+
+## 动态组件注册 —— 与固定 Catalog 路线的分野
+
+AGenUI / flutter_genui 等走「端上预置组件清单，AI 从中挑选」的固定 Catalog 路线；
+GenUI 的路线是：**AI 现场写组件模板 → `MoBridge.ui.component()` 注册 → 组件树里自己复用 → 原生渲染**。
+组件面不预置、由 AI 按需生长（模板支持 `{{prop}}` 插值与 `{"slot":true}` 插槽，深度/节点数双上限防失控）。
+同时兼容 Google A2UI 协议组件名（A2uiCatalog 自动映射）。
+
+## A2UI 生态参考
+
+GenUI 原生通道兼容 **Google A2UI 协议**的组件树（`heading/image/checkbox/list/select` 等自动映射为端上原生组件，见 `A2uiCatalog`）。同方向的开源实现：
+
+- **AGenUI**（阿里巴巴+高德）— 端云一体 A2UI 框架，iOS/Android/HarmonyOS 三端，C++
+- **a2ui-swift** — Swift 原生 A2UI SDK（iOS/macOS）
+- **flutter_genui**（Flutter 官方）— LLM Tool Calling → Component Catalog → 原生 Widget
+- **CopilotKit/generative-ui** — A2UI / AG-UI / MCP Apps 三种示例
+- GUI Agent 方向：GELab-Zero（阶跃星辰）、Open-AutoGLM、AndroidGen（智谱）、ghost（A2UI+MCP+A2A）
