@@ -34,6 +34,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.viewinterop.AndroidView
 import com.genui.app.agent.ChatMsg
 import com.genui.app.agent.ToolTrace
 import com.genui.app.ui.theme.GenTheme
@@ -129,6 +135,7 @@ fun ChatPanel(
     messages: List<ChatMsg>,
     modifier: Modifier = Modifier,
     onCardAction: (String) -> Unit = {},
+    onOpenCanvas: (String) -> Unit = {},
 ) {
     val listState = rememberLazyListState()
     // 自动跟随：消息数量变化时滚到最后一条；用户向上翻页（不在底部）时不打扰
@@ -212,7 +219,7 @@ fun ChatPanel(
                         ) {
                             Avatar("✦", bg = GenTheme.Amber.copy(alpha = 0.18f), fg = GenTheme.Amber)
                             Spacer(Modifier.width(6.dp))
-                            AssistantBubble(m.text, m.done, onCardAction, Modifier.weight(1f, fill = false))
+                            AssistantBubble(m.text, m.done, onCardAction, Modifier.weight(1f, fill = false), onOpenCanvas)
                             Spacer(Modifier.width(5.dp))
                             Text(hhmm(m.ts), color = GenTheme.Dim.copy(alpha = .6f), fontSize = 9.sp,
                                 fontFamily = FontFamily.Monospace, modifier = Modifier.align(Alignment.Bottom))
@@ -251,7 +258,7 @@ private fun UserBubble(text: String) {
 
 @Composable
 private fun AssistantBubble(text: String, done: Boolean, onCardAction: (String) -> Unit = {},
-                            modifier: Modifier = Modifier) {
+                            modifier: Modifier = Modifier, onOpenCanvas: (String) -> Unit = {}) {
     Column(
         modifier
             .widthIn(max = 310.dp)
@@ -263,12 +270,36 @@ private fun AssistantBubble(text: String, done: Boolean, onCardAction: (String) 
             ThinkingDots()
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                ChatCards.split(text).forEach { (isCard, seg) ->
-                    if (isCard) CardInline(seg)
-                    else RichText(
-                        text = seg,
-                        baseStyle = TextStyle(fontSize = 14.sp, color = GenTheme.Text, lineHeight = 21.sp),
-                    )
+                if (done) {
+                    // 完整渲染引擎分段：普通文本 → RichText；```html/裸文档 → 内嵌 WebView
+                    splitHtmlSegments(text).forEach { seg ->
+                        if (seg.startsWith(HTML_SEG)) {
+                            HtmlEngineChip(
+                                html = seg.removePrefix(HTML_SEG),
+                                onOpenCanvas = onOpenCanvas,
+                            )
+                        } else {
+                            ChatCards.split(seg).forEach { (isCard, s2) ->
+                                if (isCard) CardInline(s2)
+                                else RichText(
+                                    text = s2,
+                                    baseStyle = TextStyle(fontSize = 14.sp, color = GenTheme.Text, lineHeight = 21.sp),
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    // 流式中：只渲染文本段，html 围栏未闭合显示接收占位
+                    ChatCards.split(text).forEach { (isCard, seg) ->
+                        if (isCard) CardInline(seg)
+                        else if (seg.trimStart().startsWith("```html")) {
+                            HtmlReceivingChip()
+                        }
+                        else RichText(
+                            text = seg,
+                            baseStyle = TextStyle(fontSize = 14.sp, color = GenTheme.Text, lineHeight = 21.sp),
+                        )
+                    }
                 }
             }
             if (!done) {
@@ -432,4 +463,149 @@ private fun inlineMd(s: String): AnnotatedString = buildAnnotatedString {
         last = m.range.last + 1
     }
     if (last < s.length) append(s.substring(last))
+}
+
+
+// ───────────────────────── 对话内嵌浏览器渲染引擎 ─────────────────────────
+
+/** html 分段前缀标记（内部协议） */
+internal const val HTML_SEG = "\u0000HTMLSEG\u0000"
+
+/** 把助手回复切成 [文本段 / html 段] 序列：```html 围栏 与裸 <!DOCTYPE>…</html> 文档 */
+internal fun splitHtmlSegments(text: String): List<String> {
+    val out = mutableListOf<String>()
+    var last = 0
+    val fence = Regex("(?is)```html\\s*\\n(.*?)```")
+    val bare = Regex("(?is)(<!DOCTYPE html>.*?</html>)")
+    val marks = mutableListOf<Triple<IntRange, Boolean, String?>>() // range, isHtml, payload
+    fence.findAll(text).forEach { m ->
+        marks.add(Triple(m.range, true, m.groupValues[1].trim()))
+    }
+    // 裸文档：剔除已被围栏覆盖的范围后追加
+    val fenced = fence.findAll(text).map { it.range }.toList()
+    bare.findAll(text).forEach { m ->
+        val covered = fenced.any { it.intersects(m.range) }
+        if (!covered) marks.add(Triple(m.range, true, m.groupValues[1].trim()))
+    }
+    marks.sortBy { it.first.first }
+    for ((range, isHtml, payload) in marks) {
+        if (range.first > last) {
+            val t = text.substring(last, range.first).trim()
+            if (t.isNotBlank()) out.add(t)
+        }
+        if (isHtml) {
+            out.add(HTML_SEG + (payload ?: text.substring(range).trim()))
+            last = range.last + 1
+        }
+    }
+    if (last < text.length) {
+        val t = text.substring(last).trim()
+        if (t.isNotBlank()) out.add(t)
+    }
+    return out
+}
+
+private fun IntRange.intersects(o: IntRange) = first <= o.last && o.first <= last
+
+/** 流式接收占位：围栏未闭合 */
+@Composable
+internal fun HtmlReceivingChip() {
+    val alpha = rememberInfiniteTransition(label = "recv").animateFloat(
+        0.35f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "a")
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+            .background(GenTheme.Panel.copy(alpha = 0.6f))
+            .border(1.dp, GenTheme.Dim.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("🌐", fontSize = 13.sp)
+        Spacer(Modifier.width(7.dp))
+        Text("正在接收网页内容…", fontSize = 12.sp, color = GenTheme.Dim,
+            modifier = Modifier.graphicsLayer { this.alpha = alpha.value })
+    }
+}
+
+/**
+ * 对话内嵌完整浏览器渲染引擎：系统 WebView（Chromium），CSS/JS/DOM 全开。
+ * 高度自适应（onPageFinished 测 scrollHeight），可展开全高；一键转画布全屏体验。
+ */
+@Composable
+internal fun HtmlEngineChip(
+    html: String,
+    onOpenCanvas: (String) -> Unit,
+) {
+    val ctx = LocalContext.current
+    val density = LocalDensity.current
+    var contentH by remember(html) { mutableStateOf<Int?>(null) }   // px
+    var expanded by remember(html) { mutableStateOf(false) }
+    val maxH = with(density) { 420.dp.toPx() }.toInt()
+
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+            .background(Color.White)
+            .border(1.dp, GenTheme.Dim.copy(alpha = 0.35f), RoundedCornerShape(10.dp))
+    ) {
+        // 顶栏
+        Row(
+            Modifier.fillMaxWidth().background(Color(0xFFF4F1EA))
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("🌐", fontSize = 11.sp)
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "完整渲染" + (contentH?.let { " · ${((it / density.density).toInt())}dp" } ?: ""),
+                fontSize = 10.sp, color = GenTheme.Dim, fontFamily = FontFamily.Monospace,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                if (expanded) "收起" else "展开",
+                fontSize = 11.sp, color = GenTheme.Amber,
+                modifier = Modifier.clickable { expanded = !expanded }.padding(horizontal = 6.dp),
+            )
+            Text(
+                "画布 ↗",
+                fontSize = 11.sp, color = GenTheme.Amber,
+                modifier = Modifier.clickable { onOpenCanvas(html) }.padding(horizontal = 6.dp),
+            )
+        }
+        // WebView 容器：完整引擎
+        val hPx = when {
+            expanded -> contentH ?: maxH
+            else -> minOf(contentH ?: with(density) { 220.dp.toPx() }.toInt(), maxH)
+        }
+        AndroidView(
+            factory = { c ->
+                WebView(c).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.allowFileAccess = false
+                    settings.allowContentAccess = false
+                    setBackgroundColor(android.graphics.Color.WHITE)
+                    webViewClient = object : WebViewClient() {
+                        override fun onPageFinished(v: WebView, url: String?) {
+                            v.evaluateJavascript(
+                                "(function(){return document.documentElement.scrollHeight})()"
+                            ) { r ->
+                                val sh = r?.trim()?.removePrefix("\"")?.removeSuffix("\"")?.toFloatOrNull()?.toInt()
+                                if (sh != null && sh > 0) post { contentH = sh }
+                            }
+                        }
+                    }
+                    loadDataWithBaseURL("https://genui.local/", html, "text/html", "utf-8", null)
+                }
+            },
+            update = { /* html 变化由 remember(html) 重建处理 */ },
+            modifier = Modifier.fillMaxWidth()
+                .height(with(density) { hPx.toDp() }),
+        )
+        if (!expanded) {
+            Text(
+                "· 点「展开」查看全高，内容可交互（JS 已启用）",
+                fontSize = 9.sp, color = GenTheme.Dim,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+            )
+        }
+    }
 }

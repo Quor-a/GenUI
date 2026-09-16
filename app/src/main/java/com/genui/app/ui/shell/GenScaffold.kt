@@ -206,6 +206,8 @@ fun GenScaffold(
     var nativePopup by remember { mutableStateOf<Pair<String, String>?>(null) }
     // 跨模式共享的对话历史（绑定：切换不丢上下文）
     val chatLog = remember { mutableStateListOf<ChatMsg>() }
+    // 画布历史导航栈：前移至此声明——ensureSession 的回调（onUiDetected）也要入栈
+    val canvasStack = remember { mutableStateListOf<GeneratedPage>() }
     // 对话历史持久化：启动恢复 + 每次变更落盘（重启不丢）
     LaunchedEffect(Unit) {
         store.loadChatLog().forEach { e ->
@@ -267,12 +269,18 @@ fun GenScaffold(
                     }
                 },
                 onUiDetected = { html ->
-                    // 对话里生成的界面 → 画布渲染（对话面板让位，snackbar 召回）
+                    // 对话内嵌渲染为主；画布静默入栈供全屏回看（不再自动切屏打断对话）
+                    // 注：pushPage 是本 composable 后段声明的 local fun，此处不可见——内联入栈
                     renderer.value?.replay(html)
-                    canvasPeek = true
-                    scope.launch {
-                        val r = snackbar.showSnackbar("界面已在画布生成", actionLabel = "返回对话")
-                        if (r == androidx.compose.material3.SnackbarResult.ActionPerformed) canvasPeek = false
+                    runCatching {
+                        val page = GeneratedPage(GenStore.newId(), "对话生成 · " +
+                            java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
+                                .format(java.util.Date()), html, "chat", System.currentTimeMillis())
+                        store.appendPage(page)
+                        canvasStack.removeAll { it.id == page.id }
+                        canvasStack.add(page)
+                        while (canvasStack.size > 30) canvasStack.removeAt(0)
+                        stackCount = store.loadPages().size
                     }
                 },
                 onAskPermission = { tool, briefArg, level ->
@@ -417,8 +425,7 @@ fun GenScaffold(
         )
     }
 
-    // —— 画布历史：系统返回 = 退回上一张纸 ——
-    val canvasStack = remember { mutableStateListOf<GeneratedPage>() }
+    // —— 画布历史：系统返回 = 退回上一张纸（canvasStack 声明已前移至 chatLog 旁） ——
 
     /**
      * 根据一份产出的 HTML 恢复原生渲染层。
@@ -1096,6 +1103,10 @@ fun GenScaffold(
                 ChatPanel(
                     messages = chatLog,
                     modifier = Modifier.fillMaxSize().background(GenTheme.Screen),
+                    onOpenCanvas = { html ->
+                        renderer.value?.replay(html)
+                        canvasPeek = true
+                    },
                     onCardAction = { action ->
                         // 对话卡按钮 → 回灌 Agent 会话继续处理（此前是 no-op 死按钮）
                         scope.launch { chat("（用户点击了卡片按钮：「$action」，请基于当前上下文继续处理）") }

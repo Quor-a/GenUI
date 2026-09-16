@@ -89,18 +89,10 @@ class ChatSession(
         return doc?.groupValues?.get(1)
     }
 
-    /** 回答含完整界面时：气泡只留提示，HTML 走画布渲染 */
+    /** 回答含完整界面时：原文进消息（对话框内嵌完整渲染引擎），同时通知画布入栈 */
     private fun deliverMaybeUi(aid: String, text: String) {
-        val html = extractHtml(text)
-        if (html == null) {
-            onAssistantDelta(aid, text)
-        } else {
-            val prose = text.replace(Regex("(?is)```html\\s*\\n.*?```"), "")
-                .replace(Regex("(?is)<!DOCTYPE html>.*</html>"), "").trim()
-            if (prose.isNotBlank()) onAssistantDelta(aid, prose + "\n\n")
-            onAssistantDelta(aid, "🎛 已生成界面（${html.length / 1024}KB），正在画布显示")
-            onUiDetected(html)
-        }
+        onAssistantDelta(aid, text)
+        extractHtml(text)?.let { html -> onUiDetected(html) }
     }
 
     /** 长对话防爆上下文：决策轮只带最近 30 条（system 恒在首条） */
