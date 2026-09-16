@@ -16,12 +16,21 @@ import java.util.UUID
  * 不重复实现。区别仅在"产出形态"——[AgentLoop] 把结果喂给 WebView 画界面，
  * [ChatSession] 把结果以消息气泡流式呈现。
  */
+data class ToolTrace(
+    val name: String,
+    val brief: String,
+    val ms: Long = -1,              // -1 = 进行中
+    val isError: Boolean = false,
+    val denied: Boolean = false,
+)
+
 data class ChatMsg(
     val id: String,
-    val role: String,   // "user" | "assistant" | "tool"
+    val role: String,   // "user" | "assistant" | "tool" | "error"
     val text: String = "",
     val done: Boolean = false,
-    val ts: Long = System.currentTimeMillis()
+    val ts: Long = System.currentTimeMillis(),
+    val tool: ToolTrace? = null     // 工具调用结构化元数据（不持久化，运行期渲染用）
 )
 
 class ChatSession(
@@ -31,7 +40,7 @@ class ChatSession(
     private val onAssistantDelta: (id: String, delta: String) -> Unit,
     private val onAssistantDone: (id: String) -> Unit,
     private val onToolStart: (id: String, name: String, brief: String) -> Unit,
-    private val onToolResult: (id: String, result: String) -> Unit,
+    private val onToolResult: (id: String, result: String, ms: Long, ok: Boolean) -> Unit,
     private val onThinking: (String) -> Unit,
     private val onError: (String) -> Unit,
     private val onAskPermission: suspend (tool: String, brief: String, level: Int) -> Boolean,
@@ -254,7 +263,7 @@ class ChatSession(
                         onAskPermission(t, b, l)
                     }
                     if (verdict != null) {
-                        onToolResult(tid, "已拒绝：$verdict")
+                        onToolResult(tid, "已拒绝：$verdict", -1L, true)
                         messages.put(JSONObject().put("role", "tool")
                             .put("tool_call_id", callId)
                             .put("content", JSONObject().put("denied", verdict).toString()))
@@ -268,7 +277,7 @@ class ChatSession(
                     // 原始 JSON，用户根本读不了
                     onToolResult(tid,
                         (if (ok) "✅ " else "❌ ") + "$name · " + ToolSummarize.fmtMs(cost) +
-                            "\n" + ToolSummarize.summarize(name, res))
+                            "\n" + ToolSummarize.summarize(name, res), cost, !ok)
                     messages.put(JSONObject().put("role", "tool")
                         .put("tool_call_id", callId)
                         .put("content", res.toString()))

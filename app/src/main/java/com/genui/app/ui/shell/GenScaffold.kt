@@ -239,13 +239,19 @@ fun GenScaffold(
                     val i = chatLog.indexOfFirst { it.id == id }
                     if (i >= 0) chatLog[i] = chatLog[i].copy(done = true)
                 },
-                onToolStart = { id, name, brief -> chatLog.add(ChatMsg(id, "tool", "⚙ $name($brief)…", false)) },
-                onToolResult = { id, result ->
+                onToolStart = { id, name, brief ->
+                    chatLog.add(ChatMsg(id, "tool", "⚙ $name($brief)…", false,
+                        tool = com.genui.app.agent.ToolTrace(name = name, brief = brief)))
+                },
+                onToolResult = { id, result, ms, ok ->
                     val i = chatLog.indexOfFirst { it.id == id }
                     if (i >= 0) chatLog[i] = chatLog[i].copy(
                         // ChatSession 已人类可读化（摘要+耗时），不再二次截断
                         text = result,
-                        done = true
+                        done = true,
+                        tool = chatLog[i].tool?.copy(
+                            ms = ms, isError = !ok,
+                            denied = result.startsWith("已拒绝"))
                     )
                 },
                 onThinking = { s -> if (phase != Phase.Rendering) phaseDetail = s },

@@ -13,8 +13,8 @@ android {
         applicationId = "com.genui.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 55
-        versionName = "0.16.0"
+        versionCode = 56
+        versionName = "0.16.1"
     }
 
     // 项目固定签名：signing/genui.keystore（口令直接写在本文件，debug 级可接受）。
