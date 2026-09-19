@@ -39,11 +39,11 @@ class FlexLayout(private val viewportWidth: Float, private val viewportHeight: F
             node.width = 0f; node.height = 0f
             return
         }
-        // CSS 规范：显式 display:flex 的容器 flex-direction 初始值是 row；
-        // 块级容器（未写 display，微信 view 默认）纵向堆叠（v0.26.7：修全屏横排 bug）
+        // 引擎级鲁棒决策（v0.27.2）：AI 生成场景"写 display:flex 漏写 flex-direction"是高频
+        // 错误（pomodoro 整页横排的根因），CSS 标准的 ROW 初值在手机上产出废页。规则改为：
+        // 未显式写 flex-direction 一律 COLUMN（纵向单列）；想横排必须显式写 flex-direction:row。
         if (!st.flexDirectionSet) {
-            st.flexDirection = if (st.display == Display.FLEX) FlexDirection.ROW
-                               else FlexDirection.COLUMN
+            st.flexDirection = FlexDirection.COLUMN
         }
         val padH = resolve(st.padding.left, availW) + resolve(st.padding.right, availW)
         val padV = resolve(st.padding.top, availH) + resolve(st.padding.bottom, availH)
