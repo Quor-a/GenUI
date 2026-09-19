@@ -47,6 +47,48 @@ class MiniAppView @JvmOverloads constructor(
     private val surfaceView = SurfaceView(context)
     private val overlay = FrameLayout(context)
     private val painter = CanvasPainter()
+
+    // ---- 内置图片加载器：企业级 image 组件的必需能力（网络/http(s)/data-uri/本地文件） ----
+    private val imgCache = object : android.util.LruCache<String, android.graphics.Bitmap>(24) {
+        override fun sizeOf(key: String, value: android.graphics.Bitmap) = value.byteCount
+    }
+    private val imgPool = java.util.concurrent.Executors.newFixedThreadPool(3)
+    private val pendingImgs = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    init {
+        painter.imageProvider = { src -> loadBitmap(src) }
+    }
+
+    /** 同步取缓存，未命中异步加载（完成后 markDirty 重绘） */
+    private fun loadBitmap(src: String): android.graphics.Bitmap? {
+        if (src.isEmpty()) return null
+        imgCache.get(src)?.let { return it }
+        if (!pendingImgs.add(src)) return null           // 在途去重
+        imgPool.execute {
+            val bmp = runCatching {
+                when {
+                    src.startsWith("data:") -> {
+                        val b64 = src.substringAfter("base64,")
+                        android.graphics.BitmapFactory.decodeByteArray(
+                            android.util.Base64.decode(b64, android.util.Base64.DEFAULT), 0, 0)
+                    }
+                    src.startsWith("http") -> {
+                        val conn = java.net.URL(src).openConnection() as java.net.HttpURLConnection
+                        conn.connectTimeout = 8000; conn.readTimeout = 8000
+                        conn.inputStream.use { android.graphics.BitmapFactory.decodeStream(it) }
+                    }
+                    else -> android.graphics.BitmapFactory.decodeFile(
+                        src.removePrefix("file://"))                  // 包内/本地文件
+                }
+            }.getOrNull()
+            pendingImgs.remove(src)
+            if (bmp != null) {
+                imgCache.put(src, bmp)
+                post { markDirty() }                                   // 主线程重绘
+            }
+        }
+        return null
+    }
     private lateinit var logic: LogicRuntime
     private lateinit var wxApi: WxApi
     private var appConfig: AppConfig = AppConfig.empty()
@@ -327,6 +369,23 @@ class MiniAppView @JvmOverloads constructor(
     // ------------------------------------------------------------ input
     private var downX = 0f
     private var downY = 0f
+    // ---- fling 惯性滚动状态 ----
+    private val flingTracker = android.view.VelocityTracker.obtain()
+    private var flingNode: RenderNode? = null
+    private var flingVelocity = 0f
+    private val flingRunnable = object : Runnable {
+        override fun run() {
+            val node = flingNode ?: return
+            flingVelocity *= 0.94f                                  // 指数衰减（~60fps 手感）
+            node.scrollTop = (node.scrollTop - flingVelocity / 60f)
+                .coerceIn(0f, maxOf(0f, node.contentHeight - node.height))
+            markDirty()
+            if (Math.abs(flingVelocity) > 60f) postOnAnimation(this)
+            else flingNode = null
+        }
+    }
+    private fun postInvalidateOnFling() = postOnAnimation(flingRunnable)
+
     private var scrollNode: RenderNode? = null
     private var scrollStartY = 0f
 
@@ -339,9 +398,13 @@ class MiniAppView @JvmOverloads constructor(
                 downY = event.y
                 scrollNode = findScrollable(root, event.x, event.y)
                 scrollStartY = event.y
+                flingTracker.clear()
+                flingTracker.addMovement(event)
+                flingNode = null                                  // 新手势取消惯性
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
+                flingTracker.addMovement(event)
                 val node = scrollNode
                 if (node != null) {
                     node.scrollTop = (node.scrollTop - (event.y - scrollStartY))
@@ -354,7 +417,18 @@ class MiniAppView @JvmOverloads constructor(
             MotionEvent.ACTION_UP -> {
                 val dx = event.x - downX
                 val dy = event.y - downY
-                scrollNode?.let { saveScroll(entry) }
+                flingTracker.addMovement(event)
+                scrollNode?.let { node ->
+                    saveScroll(entry)
+                    // 惯性 fling：松手速度驱动滚动衰减（企业级列表手感的基本盘）
+                    flingTracker.computeCurrentVelocity(1000, 8000f)
+                    val vy = flingTracker.yVelocity
+                    if (Math.abs(vy) > 300f && node.contentHeight > node.height) {
+                        flingNode = node
+                        flingVelocity = vy
+                        postInvalidateOnFling()
+                    }
+                }
                 scrollNode = null
                 if (Math.abs(dx) < 12 && Math.abs(dy) < 12) {
                     handleTap(root, event.x, event.y)
