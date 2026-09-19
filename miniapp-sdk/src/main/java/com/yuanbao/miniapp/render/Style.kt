@@ -174,6 +174,15 @@ class Style {
     var backgroundColor: Int = Color.TRANSPARENT
     /** linear-gradient 解析结果：角度(度) + 色标列表；null=纯色 */
     var bgGradient: Gradient? = null
+    var shadowColor: Int = Color.TRANSPARENT
+    var shadowBlur: Float = 0f
+    var shadowDx: Float = 0f
+    var shadowDy: Float = 0f
+    var shadowSet = false
+    // transform: translate/rotate/scale（绘制期矩阵，不参与布局计算）
+    var trTranslateX: Float = 0f; var trTranslateY: Float = 0f
+    var trRotate: Float = 0f; var trScale: Float = 1f
+    var trSet = false
     var color: Int = Color.BLACK
     var fontSize: Float = 16f          // px
     var fontWeight: FontWeight = FontWeight.NORMAL
@@ -211,6 +220,14 @@ class Style {
         if (other.rightSet) right = other.right
         if (other.bottomSet) bottom = other.bottom
         if (other.bgSet) { backgroundColor = other.backgroundColor; bgGradient = other.bgGradient }
+        if (other.shadowSet) {
+            shadowColor = other.shadowColor; shadowBlur = other.shadowBlur
+            shadowDx = other.shadowDx; shadowDy = other.shadowDy; shadowSet = true
+        }
+        if (other.trSet) {
+            trTranslateX = other.trTranslateX; trTranslateY = other.trTranslateY
+            trRotate = other.trRotate; trScale = other.trScale; trSet = true
+        }
         if (other.colorSet) color = other.color
         if (other.fontSizeSet) fontSize = other.fontSize
         if (other.weightSet) fontWeight = other.fontWeight
@@ -364,6 +381,40 @@ class Style {
                     "padding-bottom" -> { s.padding = s.padding.copy(bottom = Length.parse(v)); s.paddingSet = true }
                     "padding-left" -> { s.padding = s.padding.copy(left = Length.parse(v)); s.paddingSet = true }
                     "position" -> { s.position = if (v == "absolute") PositionType.ABSOLUTE else PositionType.RELATIVE; s.positionSet = true }
+                    "box-shadow" -> {
+                        // 语法：X Y [blur] [spread] color（spread 忽略）
+                        val p = v.trim().split(Regex("\\s+"))
+                        if (p.size >= 3) {
+                            val colorPart = p.last()
+                            s.shadowColor = Gradient.parseCssColor(colorPart) ?: parseColor(colorPart) ?: Color.TRANSPARENT
+                            val nums = p.dropLast(1).mapNotNull { it.removeSuffix("rpx").toFloatOrNull() }
+                            if (nums.isNotEmpty()) {
+                                s.shadowDx = nums.getOrElse(0) { 0f }
+                                s.shadowDy = nums.getOrElse(1) { 0f }
+                                s.shadowBlur = nums.getOrElse(2) { 0f }
+                                s.shadowSet = s.shadowColor != Color.TRANSPARENT
+                            }
+                        }
+                    }
+                    "transform" -> {
+                        // 支持 translate(x,y) / rotate(deg) / scale(n) 空格分隔组合
+                        for (fn in Regex("(translate|rotate|scale)\\(([^)]*)\\)").findAll(v)) {
+                            val args = fn.groupValues[2].split(",").mapNotNull { it.trim().toFloatOrNull() }
+                            when (fn.groupValues[1]) {
+                                "translate" -> {
+                                    s.trTranslateX += args.getOrElse(0) { 0f }
+                                    s.trTranslateY += args.getOrElse(1) { 0f }
+                                    s.trSet = true
+                                }
+                                "rotate" -> { s.trRotate += args.getOrElse(0) { 0f }; s.trSet = true }
+                                "scale" -> {
+                                    val sc = args.getOrElse(0) { 1f }
+                                    s.trScale *= if (args.size > 1) 1f else sc
+                                    s.trSet = true
+                                }
+                            }
+                        }
+                    }
                     "left" -> { s.left = Length.parse(v); s.leftSet = true }
                     "top" -> { s.top = Length.parse(v); s.topSet = true }
                     "right" -> { s.right = Length.parse(v); s.rightSet = true }

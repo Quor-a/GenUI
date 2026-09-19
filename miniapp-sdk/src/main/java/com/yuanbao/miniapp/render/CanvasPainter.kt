@@ -17,6 +17,7 @@ class CanvasPainter {
 
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val rect = RectF()
@@ -47,6 +48,30 @@ class CanvasPainter {
 
         val scrollable = st.overflow == Overflow.SCROLL
         val saveCount = canvas.save()
+        if (st.trSet) {                                          // transform：绘制期矩阵（AI 位置/形态自由）
+            canvas.save()
+            // 围绕节点中心变换；末尾回退绝对基准，使后续 absX/absY 坐标绘制正确落位
+            canvas.translate(node.absX + node.width / 2f + st.trTranslateX,
+                node.absY + node.height / 2f + st.trTranslateY)
+            canvas.rotate(st.trRotate)
+            canvas.scale(st.trScale, st.trScale)
+            canvas.translate(-node.width / 2f - node.absX, -node.height / 2f - node.absY)
+        }
+        if (st.shadowSet) {                                      // box-shadow：卡片层次/浮层深度
+            fillPaint.style = Paint.Style.FILL
+            fillPaint.color = Color.TRANSPARENT
+            fillPaint.setShadowLayer(st.shadowBlur.coerceAtLeast(0.1f),
+                st.shadowDx, st.shadowDy, st.shadowColor)
+            if (st.borderRadius > 0f) {
+                path.reset()
+                path.addRoundRect(node.absX, node.absY, node.absX + node.width, node.absY + node.height,
+                    st.borderRadius, st.borderRadius, Path.Direction.CW)
+                canvas.drawPath(path, fillPaint)
+            } else {
+                canvas.drawRect(node.absX, node.absY, node.absX + node.width, node.absY + node.height, fillPaint)
+            }
+            fillPaint.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
+        }
         if (scrollable) {
             canvas.clipRect(node.absX, node.absY, node.absX + node.width, node.absY + node.height)
         } else if (st.overflow == Overflow.HIDDEN) {
@@ -115,8 +140,9 @@ class CanvasPainter {
 
         when (node.type) {
             NodeType.TEXT -> drawText(canvas, node)
-            NodeType.BUTTON -> {
-                drawText(canvas, node)
+            NodeType.BUTTON -> when (node.tag) {
+                "switch", "checkbox", "radio" -> drawSwitchLike(canvas, node)
+                else -> drawText(canvas, node)
             }
             NodeType.INPUT -> drawInput(canvas, node)
             NodeType.IMAGE -> drawImage(canvas, node)
@@ -172,6 +198,57 @@ class CanvasPainter {
             canvas.drawText(line, x, y, textPaint)
             y += lh
         }
+    }
+
+    /** switch/checkbox/radio 真形态：选中态来自 checked 属性绑定（AI 改 data 即重绘） */
+    private fun drawSwitchLike(canvas: Canvas, node: RenderNode) {
+        val st = node.style
+        val checked = node.attributes["checked"] == "true" ||
+            node.attributes["checked"].let { it != null && it != "false" && it != "" }
+        val accent = if (st.backgroundColor != Color.TRANSPARENT) st.backgroundColor else 0xFF07C160.toInt()
+        val h = node.height.coerceAtLeast(24f); val w = if (node.tag == "switch") h * 1.9f else h
+        val cx = node.absX; val cy = node.absY + node.height / 2f - h / 2f
+        fillPaint.style = Paint.Style.FILL
+        when (node.tag) {
+            "switch" -> {
+                fillPaint.color = if (checked) accent else 0xFFE5E5E5.toInt()
+                canvas.drawRoundRect(cx, cy, cx + w, cy + h, h / 2f, h / 2f, fillPaint)
+                fillPaint.color = Color.WHITE
+                val knobR = h / 2f - 3f
+                val kx = if (checked) cx + w - h / 2f else cx + h / 2f
+                canvas.drawCircle(kx, cy + h / 2f, knobR, fillPaint)
+            }
+            "radio" -> {
+                fillPaint.style = Paint.Style.STROKE
+                fillPaint.strokeWidth = 2f
+                fillPaint.color = if (checked) accent else 0xFFC8C8C8.toInt()
+                canvas.drawCircle(cx + h / 2f, cy + h / 2f, h / 2f - 2f, fillPaint)
+                if (checked) {
+                    fillPaint.style = Paint.Style.FILL
+                    canvas.drawCircle(cx + h / 2f, cy + h / 2f, h / 2f - 6f, fillPaint)
+                }
+            }
+            else -> { // checkbox
+                fillPaint.style = Paint.Style.STROKE
+                fillPaint.strokeWidth = 2f
+                fillPaint.color = if (checked) accent else 0xFFC8C8C8.toInt()
+                canvas.drawRoundRect(cx, cy, cx + h, cy + h, 4f, 4f, fillPaint)
+                if (checked) {
+                    fillPaint.style = Paint.Style.FILL
+                    canvas.drawRoundRect(cx, cy, cx + h, cy + h, 4f, 4f, fillPaint)
+                    strokePaint.style = Paint.Style.STROKE
+                    strokePaint.strokeWidth = 2.4f
+                    strokePaint.color = Color.WHITE
+                    strokePaint.strokeCap = Paint.Cap.ROUND
+                    val line = Path()
+                    line.moveTo(cx + h * 0.25f, cy + h * 0.52f)
+                    line.lineTo(cx + h * 0.44f, cy + h * 0.72f)
+                    line.lineTo(cx + h * 0.78f, cy + h * 0.3f)
+                    canvas.drawPath(line, strokePaint)
+                }
+            }
+        }
+        drawText(canvas, node)
     }
 
     private fun drawInput(canvas: Canvas, node: RenderNode) {
