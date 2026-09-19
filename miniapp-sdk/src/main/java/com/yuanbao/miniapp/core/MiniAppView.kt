@@ -395,17 +395,43 @@ class MiniAppView @JvmOverloads constructor(
     private var flingNode: RenderNode? = null
     private var flingVelocity = 0f
     private val flingRunnable = object : Runnable {
+        private var lastNanos = 0L
         override fun run() {
             val node = flingNode ?: return
-            flingVelocity *= 0.94f                                  // 指数衰减（~60fps 手感）
-            node.scrollTop = (node.scrollTop - flingVelocity / 60f)
+            val now = System.nanoTime()
+            val dtMs = if (lastNanos == 0L) 16.6f else (now - lastNanos) / 1_000_000f
+            lastNanos = now
+            // 高刷适配（120/90Hz）：衰减与位移按实测帧间隔缩放，滚动速度与刷新率无关
+            val k = Math.pow(0.94, (dtMs / 16.666f).toDouble()).toFloat()
+            flingVelocity *= k
+            node.scrollTop = (node.scrollTop - flingVelocity * dtMs / 1000f)
                 .coerceIn(0f, maxOf(0f, node.contentHeight - node.height))
             markDirty()
             if (Math.abs(flingVelocity) > 60f) postOnAnimation(this)
-            else flingNode = null
+            else { flingNode = null; lastNanos = 0L }
         }
     }
     private fun postInvalidateOnFling() = postOnAnimation(flingRunnable)
+
+    private fun fireBindEvent(node: RenderNode, type: String, x: Float, y: Float) {
+        val handler = node.events[type] ?: return
+        val args = LinkedHashMap<String, Json>()
+        args["type"] = Json.Str(type)
+        args["timeStamp"] = Json.Num(System.currentTimeMillis().toDouble())
+        args["target"] = Json.obj(
+            "id" to Json.Num(node.id.toDouble()),
+            "dataset" to Json.Obj(LinkedHashMap<String, Json>().apply {
+                node.attributes.filterKeys { it.startsWith("data-") }.forEach { (k, v) ->
+                    put(k.removePrefix("data-"), Json.Str(v))
+                }
+            }))
+        logic.dispatchEvent(handler, com.yuanbao.miniapp.util.writeJson(Json.Arr(mutableListOf<Json>(Json.Obj(args)))))
+    }
+
+    // ---- 长按（longpress）状态 ----
+    private var longPressFired = false
+    private var pendingLongPress: (() -> Unit)? = null
+    private val longPressRunnable = Runnable { pendingLongPress?.invoke() }
 
     private var scrollNode: RenderNode? = null
     private var scrollStartY = 0f
@@ -422,10 +448,25 @@ class MiniAppView @JvmOverloads constructor(
                 flingTracker.clear()
                 flingTracker.addMovement(event)
                 flingNode = null                                  // 新手势取消惯性
+                longPressFired = false
+                val lpNode = hitTest(root, event.x, event.y)
+                if (lpNode != null && (lpNode.events.containsKey("longpress"))) {
+                    val captured = lpNode
+                    val lx = event.x; val ly = event.y
+                    postDelayed(longPressRunnable, 500L)
+                    pendingLongPress = { if (captured.events.containsKey("longpress")) {
+                        val fn = captured.events["longpress"]
+                        if (fn != null) fireBindEvent(captured, "longpress", lx, ly)
+                        longPressFired = true
+                    } }
+                } else pendingLongPress = null
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
                 flingTracker.addMovement(event)
+                if (Math.abs(event.y - downY) > 24f || Math.abs(event.x - downX) > 24f) {
+                    removeCallbacks(longPressRunnable)
+                }
                 val node = scrollNode
                 if (node != null) {
                     node.scrollTop = (node.scrollTop - (event.y - scrollStartY))
@@ -439,6 +480,7 @@ class MiniAppView @JvmOverloads constructor(
                 val dx = event.x - downX
                 val dy = event.y - downY
                 flingTracker.addMovement(event)
+                removeCallbacks(longPressRunnable)
                 scrollNode?.let { node ->
                     saveScroll(entry)
                     // 惯性 fling：松手速度驱动滚动衰减（企业级列表手感的基本盘）
@@ -451,9 +493,11 @@ class MiniAppView @JvmOverloads constructor(
                     }
                 }
                 scrollNode = null
-                if (Math.abs(dx) < 12 && Math.abs(dy) < 12) {
-                    handleTap(root, event.x, event.y)
+                val touchSlop = 12f * resources.displayMetrics.density   // 密度无关触摸容差
+                if (Math.abs(dx) < touchSlop && Math.abs(dy) < touchSlop) {
+                    if (!longPressFired) handleTap(root, event.x, event.y)
                 }
+                longPressFired = false
                 return true
             }
         }

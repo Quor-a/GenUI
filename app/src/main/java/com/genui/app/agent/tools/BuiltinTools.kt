@@ -749,9 +749,10 @@ class BuiltinTools(private val context: Context) {
 
     private fun openMiniApp(appId: String): JSONObject {
         if (appId.isBlank()) throw IllegalArgumentException("app_id 不能为空")
+        val dirName = safeDirName(appId)
         val has = runCatching {
-            context.assets.list("miniprograms/$appId")?.isNotEmpty() == true
-        }.getOrDefault(false) || java.io.File(miniAppsRoot(), appId).let { it.isDirectory && java.io.File(it, "app.json").exists() }
+            context.assets.list("miniprograms/$dirName")?.isNotEmpty() == true
+        }.getOrDefault(false) || java.io.File(miniAppsRoot(), dirName).let { it.isDirectory && java.io.File(it, "app.json").exists() }
         if (!has) throw IllegalArgumentException("小程序不存在：$appId（可先 list_miniapps）")
         val it = android.content.Intent(context, com.genui.app.miniapp.GenUiMiniAppActivity::class.java)
             .putExtra("appId", appId)
@@ -760,14 +761,29 @@ class BuiltinTools(private val context: Context) {
         return JSONObject().put("opened", appId)
     }
 
+    /** app_id → 文件系统安全目录名（确定性双向映射：open/list 用同函数自动兼容） */
+    private fun safeDirName(id: String): String {
+        val sb = StringBuilder()
+        for (c in id.trim()) when {
+            c in 'a'..'z' || c in '0'..'9' || c == '-' || c == '_' -> sb.append(c)
+            c in 'A'..'Z' -> sb.append(c.lowercaseChar())
+            c.code > 127 -> sb.append("_u").append(Integer.toHexString(c.code))
+            else -> sb.append('_')
+        }
+        val r = sb.toString().ifEmpty { "app" }
+        return if (r.length > 64) r.substring(0, 64) + "_" + Integer.toHexString(id.hashCode()) else r
+    }
+
     private fun createMiniApp(appId: String, args: JSONObject): JSONObject {
-        if (appId.isBlank() || !appId.matches(Regex("[a-z0-9_-]{2,32}")))
-            throw IllegalArgumentException("app_id 需为 2-32 位小写英文/数字/-/_")
-        if (appId in setOf("hello", "todo"))
-            throw IllegalArgumentException("app_id '$appId' 与内置示例冲突，请换一个（如 ledger-app、focus-clock）")
+        // v0.28.5：app_id 支持中文/Unicode（TA 点名补齐）——内部目录名做确定性安全映射，
+        // 同名 id 永远映射到同一目录（open/list 自动兼容）
+        if (appId.isBlank() || appId.length > 64)
+            throw IllegalArgumentException("app_id 需 1-64 字符（支持中文/英文/数字），且不能为空")
+        if (appId in setOf("hello", "todo", "hello 小程序"))
+            throw IllegalArgumentException("app_id '$appId' 与内置示例冲突，请换一个名字")
         val files = args.optJSONObject("files")
             ?: throw IllegalArgumentException("files 缺失：需为 {路径: 内容} 映射")
-        val root = java.io.File(miniAppsRoot(), appId)
+        val root = java.io.File(miniAppsRoot(), safeDirName(appId))
         if (root.exists()) root.deleteRecursively()
         val title = args.optString("title", appId)
         // 无 app.json 时兜底生成（保证包结构可运行）
