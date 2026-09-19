@@ -146,11 +146,12 @@ class MiniAppView @JvmOverloads constructor(
 
     // ------------------------------------------------------------ lifecycle
     fun start(packageLoader: MiniPackage, config: AppConfig) {
+        // 防重入：Compose 重组/宿主复用可能多次调用 start，二次进入直接返回
+        if (this::wxApi.isInitialized && this::logic.isInitialized) return
         pkg = packageLoader
         appConfig = config
-        wxApi = WxApi(context, this, overlay)
-        wxApi.packageRef = packageLoader
-        wxApi.pkgId = packageLoader.appId
+        // appId/包引用走 WxApi 构造参数——不存在任何"先使用后注入"的时序窗口
+        wxApi = WxApi(context, this, overlay, packageLoader.appId, packageLoader)
         logic = LogicRuntime(packageLoader, wxApi, this, object : LogicRuntime.EngineListener {
             override fun onLog(level: String, message: String) { logListener?.invoke(level, message) }
             override fun onError(message: String) { errorListener?.invoke(message) }

@@ -28,7 +28,9 @@ import kotlin.math.roundToInt
 class WxApi(
     private val context: Context,
     private val navigation: NavigationHost?,
-    private val overlay: FrameLayout?
+    private val overlay: FrameLayout?,
+    private val pkgId: String = "",
+    var packageRef: com.yuanbao.miniapp.pack.MiniPackage? = null
 ) {
     /** Bound by the logic runtime once the JS engine exists. */
     private lateinit var engine: JsEngine
@@ -491,9 +493,7 @@ class WxApi(
         logicHandler.post { callCallback(cb, writeJson(result)) }
     }
 
-    /** 包引用（字体等包内资源），由 MiniAppView.start 注入 */
-    var packageRef: com.yuanbao.miniapp.pack.MiniPackage? = null
-    var pkgId: String = ""
+    // （packageRef/pkgId 已上移为构造参数——v0.28.9 根治注入时序崩溃）
 
     // ---- 字体引用（v0.28.6）：source = "url(https://…ttf)" 或 "package:assets/fonts/x.ttf" ----
     private fun loadFontFace(list: List<Json>): String {
