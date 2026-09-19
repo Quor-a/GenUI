@@ -763,6 +763,8 @@ class BuiltinTools(private val context: Context) {
     private fun createMiniApp(appId: String, args: JSONObject): JSONObject {
         if (appId.isBlank() || !appId.matches(Regex("[a-z0-9_-]{2,32}")))
             throw IllegalArgumentException("app_id 需为 2-32 位小写英文/数字/-/_")
+        if (appId in setOf("hello", "todo"))
+            throw IllegalArgumentException("app_id '$appId' 与内置示例冲突，请换一个（如 ledger-app、focus-clock）")
         val files = args.optJSONObject("files")
             ?: throw IllegalArgumentException("files 缺失：需为 {路径: 内容} 映射")
         val root = java.io.File(miniAppsRoot(), appId)
@@ -869,6 +871,10 @@ class BuiltinTools(private val context: Context) {
         } finally {
             runCatching { engine.close() }
         }
+        // 空壳检测：总内容过薄大概率是骨架/示例残留，提示 AI 补全真实功能
+        val totalBytes = keys.sumOf { (java.io.File(root, it).length() / 1L) }
+        if (totalBytes < 600) jsonWarnings.add(
+            "小程序内容过于单薄（共 ${totalBytes}B）——疑似骨架未填功能，请补全完整业务逻辑与界面后重做")
         val ret = JSONObject().put("created", appId)
             .put("root", root.absolutePath)
             .put("files", org.json.JSONArray(keys))
