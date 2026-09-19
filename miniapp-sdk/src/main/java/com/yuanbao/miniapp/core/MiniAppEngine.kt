@@ -73,9 +73,21 @@ object MiniAppEngine {
     fun createEngine(): com.yuanbao.miniapp.js.JsEngine = com.yuanbao.miniapp.js.JsEngine()
 
     /** Creates a running mini program view by appId（用户目录优先，回退内置 assets） */
-    fun createResolved(context: Context, appId: String): MiniAppView? {
+    /** 原生引擎直连（Skyline 通道本体；对话卡/画布等宿主请用 [createResolved] 双引擎分派） */
+    fun createResolvedView(context: Context, appId: String): MiniAppView? {
         val pkg = resolvePackage(context, appId) ?: return null
         return create(context, pkg)
+    }
+
+    /**
+     * 双引擎分派入口（微信 Skyline/WebView 双轨架构，v0.27.0）：
+     * app.json "renderer" 决定默认引擎——"webview" 传统 WebView 通道（默认启用，CSS 全量兼容）、
+     * "skyline" 自研原生引擎（逻辑/视图分离、共享实例、低内存）；page.json 可按页面覆写实现混跳。
+     * 返回通用宿主容器。
+     */
+    fun createResolved(context: Context, appId: String): MiniAppHostView? {
+        val pkg = resolvePackage(context, appId) ?: return null
+        return MiniAppHostView.create(context, pkg, appId)
     }
 
     /** Creates a running mini program view from a .mapkg (zip) file. */

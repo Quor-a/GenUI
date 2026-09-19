@@ -18,7 +18,7 @@ import com.yuanbao.miniapp.core.MiniAppView
  */
 class GenUiMiniAppActivity : Activity() {
 
-    private var miniAppView: MiniAppView? = null
+    private var miniAppView: com.yuanbao.miniapp.core.MiniAppHostView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -80,7 +80,7 @@ class GenUiMiniAppActivity : Activity() {
     }
 
     override fun onDestroy() {
-        miniAppView?.let { MiniAppEngine.destroy(it) }
+        miniAppView?.release()
         miniAppView = null
         super.onDestroy()
     }
