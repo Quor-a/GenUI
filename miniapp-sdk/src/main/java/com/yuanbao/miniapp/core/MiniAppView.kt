@@ -63,6 +63,18 @@ class MiniAppView @JvmOverloads constructor(
     private fun loadBitmap(src: String): android.graphics.Bitmap? {
         if (src.isEmpty()) return null
         imgCache.get(src)?.let { return it }
+        // 包内资源（相对路径）：同步直读——资源已随包落盘，无需异步
+        if (!src.startsWith("http") && !src.startsWith("data:")) {
+            val clean = src.removePrefix("file://").substringAfterLast('/')
+            val bytes = runCatching { pkg?.readBytes(src.removePrefix("file://"))
+                ?: pkg?.readBytes(clean) }.getOrNull()
+            if (bytes != null) {
+                val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                if (bmp != null) imgCache.put(src, bmp)
+                return bmp
+            }
+            return android.graphics.BitmapFactory.decodeFile(src.removePrefix("file://"))
+        }
         if (!pendingImgs.add(src)) return null           // 在途去重
         imgPool.execute {
             val bmp = runCatching {
@@ -72,13 +84,11 @@ class MiniAppView @JvmOverloads constructor(
                         android.graphics.BitmapFactory.decodeByteArray(
                             android.util.Base64.decode(b64, android.util.Base64.DEFAULT), 0, 0)
                     }
-                    src.startsWith("http") -> {
+                    else -> {
                         val conn = java.net.URL(src).openConnection() as java.net.HttpURLConnection
                         conn.connectTimeout = 8000; conn.readTimeout = 8000
                         conn.inputStream.use { android.graphics.BitmapFactory.decodeStream(it) }
                     }
-                    else -> android.graphics.BitmapFactory.decodeFile(
-                        src.removePrefix("file://"))                  // 包内/本地文件
                 }
             }.getOrNull()
             pendingImgs.remove(src)

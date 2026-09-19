@@ -68,3 +68,13 @@
 - **v0.29**：Promise + async/await（解释器状态机实现）、多文件 require、自定义组件 Component()+slot、tabBar
 - **v0.30**：下拉刷新/触底加载、radial-gradient、富文本、Worklet 手势动画线程、分包
 - **原则**：每步保持「双引擎并存、AI 主权、交付优先」三铁律；新能力先过 assets 真实样例冒烟再默认启用
+
+## 四、资源依赖体系（v0.28.2 补齐）
+| 能力 | 之前 | 现在 |
+|---|---|---|
+| 包内二进制资源 | ❌ MiniPackage 纯文本 Map，图片/字体/音频**无法进包** | ✅ `resources: Map<String, ByteArray>`，三种来源（assets/目录/zip）按扩展名自动分流 |
+| image 相对路径 | ❌ 只认 http/data-uri/绝对路径 | ✅ 相对路径 → 包内资源同步直读 |
+| 字体/媒体资源 | ❌ | ✅ 随包分发（ttf/otf/woff/mp3/mp4…），字体绘制接入 v0.29 |
+| 资源引用方式 | — | WXML `image src="/assets/icon.png"` 相对包根，与微信语义一致 |
+
+**待建**：依赖声明体系（app.json 声明第三方组件库/资源包，引擎按需加载）——对齐 npm/package.json 语义，进 v0.29 路线图。

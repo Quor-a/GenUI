@@ -14,9 +14,15 @@ import java.util.zip.ZipInputStream
  */
 class MiniPackage(
     val appId: String,
-    private val files: Map<String, String>
+    private val files: Map<String, String>,
+    private val resources: Map<String, ByteArray> = emptyMap()
 ) {
     fun read(path: String): String? = files[normalize(path)]
+
+    /** 二进制资源读取（image/字体/音频）：相对路径即可，与 WXML 引用一致 */
+    fun readBytes(path: String): ByteArray? = resources[normalize(path)]
+
+    fun hasBinary(path: String): Boolean = resources.containsKey(normalize(path))
 
     fun has(path: String): Boolean = files.containsKey(normalize(path))
 
@@ -32,63 +38,81 @@ class MiniPackage(
     fun pageJson(page: String): String? = read("$page.json")
 
     companion object {
+        /** 二进制资源扩展名（打进包的图片/字体/媒体） */
+        val BINARY_EXT = setOf("png", "jpg", "jpeg", "webp", "gif", "bmp", "ico",
+            "ttf", "otf", "woff", "woff2", "mp3", "wav", "ogg", "m4a", "mp4")
+        fun isBinary(path: String): Boolean =
+            path.substringAfterLast('.', "").lowercase() in BINARY_EXT
+
         /** Loads from assets: assets/miniprograms/<appId>/... */
         fun fromAssets(context: Context, appId: String): MiniPackage {
             val assets = context.assets
             val base = "miniprograms/$appId"
             val out = HashMap<String, String>()
-            collect(assets, base, "", out)
-            return MiniPackage(appId, out)
+            val bin = HashMap<String, ByteArray>()
+            collect(assets, base, "", out, bin)
+            return MiniPackage(appId, out, bin)
         }
 
         private fun collect(
             assets: android.content.res.AssetManager,
             base: String,
             rel: String,
-            out: HashMap<String, String>
+            out: HashMap<String, String>,
+            bin: HashMap<String, ByteArray>
         ) {
             val dir = if (rel.isEmpty()) base else "$base/$rel"
             val list = assets.list(dir)
             if (list.isNullOrEmpty()) {
                 runCatching {
-                    assets.open(dir).use { out[rel] = readText(it) }
+                    if (isBinary(rel)) assets.open(dir).use { bin[rel] = readBytes(it) }
+                    else assets.open(dir).use { out[rel] = readText(it) }
                 }
                 return
             }
             for (name in list) {
-                collect(assets, base, if (rel.isEmpty()) name else "$rel/$name", out)
+                collect(assets, base, if (rel.isEmpty()) name else "$rel/$name", out, bin)
             }
         }
 
         /** Loads from a real directory (e.g. context.filesDir/miniapps/<appId>/) — GenUI AI 生成的小程序落地目录。 */
         fun fromDirectory(root: java.io.File, appId: String): MiniPackage {
             val out = HashMap<String, String>()
+            val bin = HashMap<String, ByteArray>()
             fun walk(dir: java.io.File, rel: String) {
                 val list = dir.listFiles() ?: return
                 for (f in list) {
                     val r = if (rel.isEmpty()) f.name else "$rel/${f.name}"
                     if (f.isDirectory) walk(f, r)
-                    else runCatching { out[r] = f.readText() }
+                    else runCatching {
+                        if (isBinary(r)) bin[r] = f.readBytes()
+                        else out[r] = f.readText()
+                    }
                 }
             }
             walk(root, "")
-            return MiniPackage(appId, out)
+            return MiniPackage(appId, out, bin)
         }
 
         /** Loads a .mapkg (ZIP) package. */
         fun fromZip(stream: InputStream, appId: String): MiniPackage {
             val out = HashMap<String, String>()
+            val bin = HashMap<String, ByteArray>()
             ZipInputStream(stream.buffered()).use { zis ->
                 while (true) {
                     val entry = zis.nextEntry ?: break
                     if (entry.isDirectory) continue
-                    out[entry.name.trimStart('/')] = readText(zis)
+                    val name = entry.name.trimStart('/')
+                    if (isBinary(name)) bin[name] = readBytes(zis)
+                    else out[name] = readText(zis)
                 }
             }
-            return MiniPackage(appId, out)
+            return MiniPackage(appId, out, bin)
         }
 
-        private fun readText(input: InputStream): String {
+        private fun readText(input: InputStream): String = String(readBytes(input), Charsets.UTF_8)
+
+        private fun readBytes(input: InputStream): ByteArray {
             val bos = ByteArrayOutputStream()
             val buf = ByteArray(8192)
             while (true) {
@@ -96,7 +120,7 @@ class MiniPackage(
                 if (n <= 0) break
                 bos.write(buf, 0, n)
             }
-            return String(bos.toByteArray(), Charsets.UTF_8)
+            return bos.toByteArray()
         }
     }
 }
