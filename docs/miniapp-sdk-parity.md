@@ -78,3 +78,29 @@
 | 资源引用方式 | — | WXML `image src="/assets/icon.png"` 相对包根，与微信语义一致 |
 
 **待建**：依赖声明体系（app.json 声明第三方组件库/资源包，引擎按需加载）——对齐 npm/package.json 语义，进 v0.29 路线图。
+
+## 五、GPU / CPU / 系统完整性（v0.28.3 实查补章）
+
+### GPU 对接
+| 层 | 现状 | 行动 |
+|---|---|---|
+| SurfaceView Canvas 路径（主路径） | **v0.28.3 起 lockHardwareCanvas 优先**：Skia 硬件光栅化 + GPU 合成（API 26+）；box-shadow 帧自动回退软件画布（ShadowLayer 在 HW canvas 不生效） | ✅ 已接线 |
+| GLRenderer（GLES20 管线） | 377 行真实现（shader/纹理图集/文本/图片节点绘制 + RenderBackend.OPENGL_ES 枚举）——**已实现未接线** | v0.30：GLSurfaceView 绘制循环接入 + 渐变/阴影/形态组件的 GL 化 |
+| Vulkan | ❌ | v0.31+ 评估（Skia Vulkan 后端） |
+
+### CPU / 线程模型
+| 线程 | 职责 | 状态 |
+|---|---|---|
+| miniapp-render | 独立渲染线程（SurfaceView 绘制循环） | ✅ |
+| 逻辑线程 | 自研 C++ JS 引擎（HandlerThread） | ✅ |
+| 图片池 | 3 线程并发加载 + LruCache | ✅ |
+| UI 线程 | 事件分发/输入/Toast | ✅ |
+| 多核利用 | 逻辑/渲染/IO 三线并行已覆盖双核以上 | ✅；渲染线程内帧任务尚无并行分片（v0.30 Worklet） |
+
+### 安卓系统能力调用完整性
+| 维度 | 已接 | 未接（路线图） |
+|---|---|---|
+| 基础 | 网络/剪贴板/震动/通知/存储/系统信息/软键盘 | — |
+| 媒体 | 图片(包内/网络/data-uri) | 相机/录音/音视频播放/相册选择 |
+| 硬件 | — | 位置/传感器(加速度/罗盘)/指纹/BLE/屏幕亮度 |
+| 安全 | 工具级权限门禁(PermRegistry) | wx 层域名白名单/敏感 API 二次授权 |

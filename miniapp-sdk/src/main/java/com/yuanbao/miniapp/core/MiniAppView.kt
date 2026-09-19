@@ -220,17 +220,28 @@ class MiniAppView @JvmOverloads constructor(
         val root = pageStack.lastOrNull()?.root ?: return
         val holder = surfaceView.holder ?: return
         var canvas: Canvas? = null
+        var hardware = false
         try {
-            canvas = holder.lockCanvas()
+            // GPU 优先（v0.28.3）：lockHardwareCanvas 走 Skia 硬件光栅化+GPU 合成；
+            // box-shadow（ShadowLayer）在硬件画布不生效 → 该帧回退软件画布保证正确
+            val rootHasShadow = root.style.shadowSet ||
+                runCatching { root.hasDescendantShadow() }.getOrDefault(false)
+            if (!rootHasShadow && android.os.Build.VERSION.SDK_INT >= 26) {
+                runCatching { canvas = holder.lockHardwareCanvas(); hardware = canvas != null }
+            }
+            if (canvas == null) canvas = holder.lockCanvas()
             if (canvas != null) {
                 painter.rpxRatio = layoutEngine.rpxRatio
-                painter.draw(canvas, root, viewportW, viewportH)
+                painter.draw(canvas!!, root, viewportW, viewportH)
             }
         } catch (t: Throwable) {
             // surface lost, next frame retries
         } finally {
             if (canvas != null) {
-                runCatching { holder.unlockCanvasAndPost(canvas) }
+                runCatching {
+                    if (hardware) holder.unlockCanvasAndPost(canvas!!)
+                    else holder.unlockCanvasAndPost(canvas!!)
+                }
             }
         }
     }

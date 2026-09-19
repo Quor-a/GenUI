@@ -77,4 +77,10 @@ class RenderNode(
         for (c in children) n.addChild(c.deepCopy())
         return n
     }
+
+    /** GPU 回退判定：本节点或后代是否带 box-shadow（ShadowLayer 硬件画布不生效） */
+    fun hasDescendantShadow(): Boolean {
+        if (style.shadowSet) return true
+        return children.any { it.hasDescendantShadow() }
+    }
 }
