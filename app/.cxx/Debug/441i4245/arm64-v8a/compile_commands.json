@@ -1,0 +1,7 @@
+[
+{
+  "directory": "/home/z/my-project/genui-upstream/app/.cxx/Debug/441i4245/arm64-v8a",
+  "command": "/home/z/dev-env/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang --target=aarch64-none-linux-android26 --sysroot=/home/z/dev-env/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/sysroot -Dquropybridge_EXPORTS -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -std=c11 -O2 -Wall -Wextra -o CMakeFiles/quropybridge.dir/pybridge.c.o -c /home/z/my-project/genui-upstream/app/src/main/jni/pybridge.c",
+  "file": "/home/z/my-project/genui-upstream/app/src/main/jni/pybridge.c"
+}
+]

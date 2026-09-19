@@ -1,6 +1,12 @@
 package com.genui.app.ui.shell
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -33,7 +39,7 @@ private sealed interface RBlock
 private data class RHeading(val level: Int, val text: String) : RBlock
 private data class RCode(val lang: String, val code: String) : RBlock
 private data class RQuote(val text: String) : RBlock
-private data class RListItem(val text: String) : RBlock
+private data class RListItem(val text: String, val marker: String = "•") : RBlock
 private object RRule : RBlock
 private data class RParagraph(val raw: String) : RBlock
 
@@ -73,15 +79,25 @@ fun RichText(
                         )
                     }
                 }
-                is RQuote -> Text(
-                    text = block.text,
-                    style = baseStyle.copy(color = GenTheme.Dim, fontWeight = FontWeight.Light),
-                    modifier = Modifier.padding(start = 10.dp, top = 4.dp, bottom = 4.dp),
-                )
+                is RQuote -> Row(
+                    Modifier.padding(start = 2.dp, top = 4.dp, bottom = 4.dp)
+                ) {
+                    Box(
+                        Modifier.width(3.dp)
+                            .heightIn(min = 20.dp)
+                            .background(GenTheme.AmberDim.copy(alpha = 0.7f),
+                                RoundedCornerShape(2.dp))
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = block.text,
+                        style = baseStyle.copy(color = GenTheme.Dim, fontWeight = FontWeight.Light),
+                    )
+                }
                 is RListItem -> Text(
                     text = buildAnnotatedString {
                         pushStyle(SpanStyle(color = GenTheme.Amber))
-                        append("• ")
+                        append(block.marker + " ")
                         pop()
                         append(parseInline(block.text, baseStyle))
                     },
@@ -94,21 +110,22 @@ fun RichText(
                 )
                 is RParagraph -> {
                     val inline = parseInline(block.raw, baseStyle)
-                    if (onLinkClick != null) {
-                        ClickableText(
-                            text = inline,
-                            style = baseStyle.copy(color = GenTheme.Text),
-                            modifier = Modifier.padding(vertical = 2.dp),
-                        ) { offset ->
-                            inline.getStringAnnotations("link", offset, offset)
-                                .firstOrNull()?.let { onLinkClick(it.item) }
-                        }
-                    } else {
-                        Text(
-                            text = inline,
-                            style = baseStyle.copy(color = GenTheme.Text),
-                            modifier = Modifier.padding(vertical = 2.dp),
-                        )
+                    val ctx = androidx.compose.ui.platform.LocalContext.current
+                    // 点击链接：外部回调优先，否则系统浏览器打开（裸 URL 自动链接的可点性保障）
+                    ClickableText(
+                        text = inline,
+                        style = baseStyle.copy(color = GenTheme.Text),
+                        modifier = Modifier.padding(vertical = 2.dp),
+                    ) { offset ->
+                        inline.getStringAnnotations("link", offset, offset)
+                            .firstOrNull()?.let { link ->
+                                if (onLinkClick != null) onLinkClick(link.item)
+                                else runCatching {
+                                    ctx.startActivity(android.content.Intent(
+                                        android.content.Intent.ACTION_VIEW,
+                                        android.net.Uri.parse(link.item)))
+                                }
+                            }
                     }
                 }
             }
@@ -145,6 +162,20 @@ private fun parseBlocks(src: String): List<RBlock> {
                     buf.append("\n").append(lines[i].replaceFirst(Regex("^\\s*[-*]\\s+"), "")); i++
                 }
                 out.add(RListItem(buf.toString()))
+                continue
+            }
+            line.matches(Regex("^\\s*\\d+\\.\\s+.*")) -> {
+                // 有序列表：保留原编号做 marker（1. 2. 3.），不再渲染成难看的段落
+                val num = Regex("^\\s*(\\d+)\\.").find(line)?.groupValues?.get(1) ?: "1"
+                val buf = StringBuilder(line.replaceFirst(Regex("^\\s*\\d+\\.\\s+"), ""))
+                i++
+                while (i < lines.size && lines[i].matches(Regex("^\\s*\\d+\\.\\s+.*"))) {
+                    val n2 = Regex("^\\s*(\\d+)\\.").find(lines[i])?.groupValues?.get(1) ?: ""
+                    buf.append("\n").append(n2).append(".\u0009")
+                        .append(lines[i].replaceFirst(Regex("^\\s*\\d+\\.\\s+"), "")); i++
+                }
+                // 多行有序项的续行 marker 处理复杂，仅单行保真：换行处用空 marker
+                out.add(RListItem(buf.toString(), marker = "$num."))
                 continue
             }
             line.isBlank() -> { }
@@ -196,6 +227,19 @@ private fun parseInline(raw: String, base: TextStyle): AnnotatedString {
                         withStyle(SpanStyle(fontWeight = FontWeight.Light, fontStyle = FontStyle.Italic)) { append(raw.substring(i + 1, end)) }
                         i = end + 1
                     } else { append(raw[i]); i++ }
+                }
+                raw.startsWith("http://", i) || raw.startsWith("https://", i) -> {
+                    // 裸 URL 自动成链：抓到空白/右括号/中文标点为止
+                    val end = raw.length
+                    var j = i
+                    while (j < end && !raw[j].isWhitespace() && raw[j] != ')' && raw[j] != '」'
+                        && raw[j] != '，' && raw[j] != '。' && raw[j] != '）' && raw[j] != '"') j++
+                    val url = raw.substring(i, j).trimEnd('.', ')')
+                    pushStyle(SpanStyle(color = Color(0xFF6FA8DC), textDecoration = TextDecoration.Underline))
+                    pushStringAnnotation("link", url)
+                    append(url)
+                    pop(); pop()
+                    i += url.length
                 }
                 raw.startsWith("<c=", i) -> {
                     val closeTag = raw.indexOf("</c>", i)

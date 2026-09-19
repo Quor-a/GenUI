@@ -8,6 +8,7 @@ import com.genui.app.websearch.Explore
 import com.genui.app.websearch.GenUiLlmCompleter
 import com.genui.app.websearch.WebSearchOrchestrator
 import com.genui.app.websearch.cache.MemoryCacheStore
+import com.genui.app.websearch.net.BraveEngine
 import com.genui.app.websearch.net.BaiduEngine
 import com.genui.app.websearch.net.BingCnHtmlEngine
 import com.genui.app.websearch.net.BingEngine
@@ -18,6 +19,8 @@ import com.genui.app.websearch.net.SearXngEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -32,6 +35,9 @@ class BuiltinTools(private val context: Context) {
 
     val memory = AgentMemory(context)
     val gate = ToolGate(context)
+
+    /** 能力模型注册表存取（vision/imageGen/tts/... 槽位） */
+    private val capStore by lazy { com.genui.app.store.GenStore(context) }
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -59,6 +65,7 @@ class BuiltinTools(private val context: Context) {
      * SearXNG 实例地址（可选）写在 filesDir/gen/searxng.txt，为空则该引擎自动跳过。
      */
     private val orchestrator: WebSearchOrchestrator by lazy {
+        com.genui.app.websearch.net.WebSearchKeys.init(context)
         val searxUrl = runCatching {
             File(File(context.filesDir, "gen"), "searxng.txt")
                 .takeIf { it.exists() }?.readText()?.trim().orEmpty()
@@ -67,8 +74,7 @@ class BuiltinTools(private val context: Context) {
             engines = listOf(
                 BingEngine(),
                 BaiduEngine(),
-                SogouEngine(),
-                BingCnHtmlEngine(),
+                BraveEngine(),
                 GoogleNewsRssEngine(),
                 DdgHtmlEngine(),
                 SearXngEngine(searxUrl)
@@ -113,7 +119,33 @@ class BuiltinTools(private val context: Context) {
             JSONObject().put("id", JSONObject().put("type", "string").put("description", "插件 id 或名称")),
             listOf("id"))
 
+        fun visionAnalyzeDecl(): JSONObject = decl("vision_analyze", "视觉理解：让视觉模型看图并回答。参数 {image: 图片路径（agent_files 内，如上传的图片或 file_save 的图）或图片 URL，question: 想问的问题}。需在「能力模型 → 视觉理解」配置端点。",
+            JSONObject()
+                .put("image", JSONObject().put("type", "string").put("description", "图片路径（agent_files 内文件名）或 http(s) URL"))
+                .put("question", JSONObject().put("type", "string").put("description", "针对图片的问题")),
+            listOf("image"))
+
+        fun imageGenerateDecl(): JSONObject = decl("image_generate", "图片生成：按文字描述生成图片，保存到 agent_files 并可展示。参数 {prompt: 画面描述（越具体越好）}。需在「能力模型 → 图片生成」配置端点。",
+            JSONObject()
+                .put("prompt", JSONObject().put("type", "string").put("description", "画面描述（风格/主体/细节）")),
+            listOf("prompt"))
+
+        fun aiBrowserDecl(): JSONObject {
+            val props = JSONObject()
+            props.put("action", JSONObject().put("type", "string")
+                .put("description", "automate=自动研究(推荐)/search=仅搜索/read=抓单页正文/download=下载文件"))
+            props.put("query", JSONObject().put("type", "string").put("description", "搜索/研究主题"))
+            props.put("url", JSONObject().put("type", "string").put("description", "read/download 的目标网址"))
+            props.put("depth", JSONObject().put("type", "integer").put("description", "automate 抓取前 N 篇，默认 4"))
+            return decl("ai_browser",
+                "【联网研究★推荐】ZorvAI 同款自动化浏览器：automate 动作在【单个调用内】完成「四引擎回退搜索→抓取前 depth 篇正文→合并带出处研究简报」（研究/查资料/查天气等任务务必只用这一次 automate，严禁拆成多次 search+read 拖慢对话）。也可 search=仅搜标题链接 / read=抓单页正文 / download=下载文件。",
+                props, listOf("action"))
+        }
+
         return JSONArray()
+            .put(aiBrowserDecl())
+            .put(visionAnalyzeDecl())
+            .put(imageGenerateDecl())
             .put(decl("web_search", "联网搜索实时信息，返回带编号 [n] 的资料片段与可溯源引用（完整管线：查询改写 → 多引擎并发检索 → 五信号重排 → 正文精读 → 引用打包）。凡涉及时效性信息（新闻、价格、版本号、赛事、天气、汇率、今天发生的事）必须先调用它，不要凭记忆回答。回答时在关键事实后标注 [n]，n 对应返回的 citations 编号。",
                 JSONObject()
                     .put("query", JSONObject().put("type", "string").put("description", "用户的原始问题，自然语言即可，内部会自动改写为搜索词"))
@@ -212,6 +244,15 @@ class BuiltinTools(private val context: Context) {
             .put(decl("calendar_query", "查询设备日历中近期的真实日程。需要日历读取权限。",
                 JSONObject().put("days", JSONObject().put("type", "integer").put("description", "往后查多少天，默认 7")),
                 emptyList()))
+            .put(pagePreviewDecl())
+            .put(pageErrorsDecl())
+            .put(pageEvalDecl())
+            .put(decl("log_write", "往执行日志（Markdown）里写一条执行笔记。关键决策、中间结论、待办都应该记下来，供后续回看。",
+                JSONObject().put("text", JSONObject().put("type", "string").put("description", "笔记内容（一行，Markdown 语法可用 **加粗**、`代码`）")),
+                    listOf("text")))
+            .put(decl("log_read", "回看执行日志：读取某天（默认今天）的完整 Markdown 日志，含任务流水、工具调用、交付记录与你写过的笔记。",
+                JSONObject().put("day", JSONObject().put("type", "string").put("description", "日期 yyyy-MM-dd，缺省今天")),
+                    emptyList()))
             .put(decl("calendar_add", "向系统日历添加一个真实日程。",
                 JSONObject()
                     .put("title", JSONObject().put("type", "string"))
@@ -219,6 +260,12 @@ class BuiltinTools(private val context: Context) {
                     .put("minutes", JSONObject().put("type", "integer").put("description", "时长（分钟），默认 60"))
                     .put("note", JSONObject().put("type", "string").put("description", "备注，可选")),
                 listOf("title", "begin")))
+            .put(decl("list_miniapps", "列出 GenUI 里全部小程序（内置示例 + 你生成的）。",
+                JSONObject(), emptyList()))
+            .put(decl("open_miniapp", "打开一个小程序（用户会看到独立的全屏界面）。先用 list_miniapps 查有哪些。",
+                JSONObject().put("app_id", JSONObject().put("type", "string").put("description", "小程序 id")),
+                listOf("app_id")))
+            .put(createMiniAppDecl())
     }
 
     // ---------- 执行分发 ----------
@@ -226,7 +273,59 @@ class BuiltinTools(private val context: Context) {
     suspend fun execute(name: String, args: JSONObject): JSONObject = withContext(Dispatchers.IO) {
         when (name) {
             "web_search" -> webSearch(args.optString("query"), args.optInt("max", 8))
-            "news_search" -> Explore.news(args.optString("query"), args.optInt("max", 10))
+            "vision_analyze" -> visionAnalyze(args.optString("image"), args.optString("question", "描述这张图片"))
+            "image_generate" -> imageGenerate(args.optString("prompt"))
+            "ai_browser" -> {
+                val action = args.optString("action", "automate").trim().lowercase()
+                when (action) {
+                    // 全分支统一 JSONObject（String 与 JSONObject 混类型会让 when 推断成 Any! 炸返回）
+                    "search" -> JSONObject().put("text", AiBrowser.search(
+                        args.optString("query"), args.optInt("limit", 5).coerceIn(1, 20)))
+                    "read" -> JSONObject().put("text", AiBrowser.readPage(args.optString("url")))
+                    "automate" -> JSONObject().put("text", AiBrowser.automate(
+                        args.optString("query"), args.optInt("depth", 4).coerceIn(1, 8)))
+                    "download" -> JSONObject().put("error",
+                        "download 暂未接入（可先用 read 读正文或等下个版本）。")
+                    else -> JSONObject().put("error", "未知 action: $action（支持 automate/search/read/download）")
+                }
+            }
+            "news_search" -> {
+                // 五层纵深（引擎可达性实时波动：同代码 10s 成功/58s 全灭交替）：
+                // 管线×2（抗抖动重试）→ AiBrowser 四引擎 → 直搜 → 垂直源；原始 query 不拼接（管线自带改写）
+                val q0 = args.optString("query")
+                val want = args.optInt("max", 10).coerceAtMost(10)
+                suspend fun pipelineOnce(tag: String): JSONObject? {
+                    val pipe = runCatching { orchestrator.search(q0) }.getOrNull() ?: return null
+                    if (pipe.context.isBlank() || pipe.citations.isEmpty()) return null
+                    val cites = JSONArray()
+                    for (c in pipe.citations) cites.put(
+                        JSONObject().put("index", c.index).put("title", c.title)
+                            .put("url", c.url).put("domain", c.domain))
+                    return JSONObject()
+                        .put("mode", "full_pipeline").put("query", q0)
+                        .put("context", pipe.context).put("citations", cites)
+                        .put("results", JSONArray(pipe.citations.map { c ->
+                            JSONObject().put("title", c.title).put("url", c.url)
+                                .put("snippet", c.domain) }))
+                        .put("engines", "管线($tag)")
+                }
+                var pipe = pipelineOnce("首跑")
+                if (pipe == null) {
+                    kotlinx.coroutines.delay(400)
+                    pipe = pipelineOnce("重试")
+                }
+                if (pipe != null) return@withContext pipe
+                val ab = AiBrowser.search(q0 + " 最新 新闻", want)
+                if (!ab.startsWith("联网搜索失败") && !ab.startsWith("未从搜索引擎解析到结果")) {
+                    return@withContext JSONObject().put("results", JSONArray())
+                        .put("text", ab).put("engines", "AiBrowser 回退链")
+                }
+                val direct: JSONObject = WebSearch.search(http, q0 + " 新闻", want)
+                if (!direct.has("error")) return@withContext direct
+                val vert = Explore.news(q0, want)
+                if (!vert.has("error")) return@withContext vert
+                JSONObject().put("error", "新闻搜索五层全部失败（管线×2/AiBrowser/直搜/垂直源）。建议改用 web_search 或稍后重试。")
+            }
             "community_search" -> Explore.community(args.optString("query"), args.optInt("max", 10))
             "github_search" -> Explore.github(
                 args.optString("query"),
@@ -236,6 +335,7 @@ class BuiltinTools(private val context: Context) {
             "web_fetch" -> webFetch(args.optString("url"), args.optInt("max_chars", 4000))
             "run_js" -> com.genui.app.agent.CodeRuntime.runJs(
                 context, args.optString("code", ""))
+            "run_python" -> runPython(args.optString("code", ""))
             "list_plugins" -> JSONObject().put("plugins", JSONArray().apply {
                 com.genui.app.agent.PluginRuntime.list(context).forEach { p ->
                     put(JSONObject().put("id", p.id).put("name", p.name).put("version", p.version)
@@ -272,6 +372,14 @@ class BuiltinTools(private val context: Context) {
             "tts_speak" -> ttsSpeak(args.optString("text"))
             "share_text" -> shareText(args.optString("title", ""), args.optString("text"))
             "open_settings" -> openSettings(args.optString("page"))
+            "log_write" -> logWrite(args.optString("text", ""))
+            "log_read" -> logRead(args.optString("day", ""))
+            "page_preview" -> pagePreview()
+            "page_errors" -> pageErrors()
+            "page_eval" -> pageEval(args.optString("js", ""))
+            "list_miniapps" -> listMiniApps()
+            "open_miniapp" -> openMiniApp(args.optString("app_id", ""))
+            "create_miniapp" -> createMiniApp(args.optString("app_id", ""), args)
             "calendar_query" -> calendarQuery(args.optInt("days", 7))
             "calendar_add" -> calendarAdd(
                 args.optString("title"), args.optString("begin"),
@@ -287,6 +395,29 @@ class BuiltinTools(private val context: Context) {
             .put("name", name).put("description", desc)
             .put("parameters", JSONObject().put("type", "object")
                 .put("properties", props).put("required", JSONArray(required))))
+
+    fun createMiniAppDecl(): JSONObject = rtDecl("create_miniapp", "创建一个完整的小程序（微信小程序语法：app.json/app.js/app.wxss + pages/index/index.{wxml,wxss,js}），保存成功后自动内嵌对话框卡片打开。适合：待办、计算器、查数工具等小应用。【尺寸单位：全部用 rpx（750rpx=整屏宽），禁止 px——否则手机上溢出】【布局：手机竖屏单列；display:flex 横排记得 flex-wrap】【多页】：app.json 的 pages 数组列出全部页面路径（每页 pages/xxx/xxx.{wxml,wxss,js} 四件套齐全），页内 wx.navigateTo({url:'/pages/xxx/xxx'}) 跳转；首屏页放 pages[0]。【JS 语法边界（自研引擎，必须严格遵守否则被打回）】：支持 var/let/const、function 声明/表达式、箭头函数、闭包、对象/数组字面量（普通 key:value 写法）、字符串 + 拼接、if/else/for/while、JSON、Page({data:{...}, onTap: function(){ this.setData({...}) }})、App({})、wx.* API；【禁用】模板字符串（反引号）、解构、展开(...)、默认参数、对象方法简写、class、async/await、可选链?.、空值合并??。",
+        JSONObject()
+            .put("app_id", JSONObject().put("type", "string").put("description", "英文短 id，如 weather-tool"))
+            .put("title", JSONObject().put("type", "string").put("description", "显示标题（写入 app.json 的 navigationBarTitleText）"))
+            .put("files", JSONObject().put("type", "object").put("description", "相对路径到文件内容的映射，路径不以 / 开头：{\"app.json\":\"...\",\"app.js\":\"...\",\"app.wxss\":\"...\",\"pages/index/index.wxml\":\"...\",\"pages/index/index.wxss\":\"...\",\"pages/index/index.js\":\"...\"}")),
+        listOf("app_id", "files"))
+
+    fun runPyDecl(): JSONObject = rtDecl("run_python",
+        "在 GenUI 内置真实 CPython 3.12 解释器中执行 Python 代码（完整 stdlib：json/re/math/datetime/urllib/hashlib/itertools/collections…）。print 输出与异常 traceback 均回传。适合：文本处理、数学计算、数据转换、协议模拟、算法实现。注意：无第三方库（无 requests/numpy），网络用 urllib；纯计算代码即可 return 无需——用 print 输出结果。",
+        JSONObject()
+            .put("code", JSONObject().put("type", "string").put("description", "Python 源码（完整脚本，用 print 输出结果）。例：import json; print(json.dumps({'sum': sum(range(100))}))")),
+        listOf("code"))
+
+    fun pagePreviewDecl(): JSONObject = rtDecl("page_preview", "【画布自检】截取当前画布渲染画面；若已配置视觉模型，会自动描述页面效果（布局/内容/明显问题）。写完界面后先调它看一眼。",
+        JSONObject(), emptyList())
+
+    fun pageErrorsDecl(): JSONObject = rtDecl("page_errors", "【画布自检】读取画布页面积累的 JS 运行时错误（console.error 与未捕获异常），读走即清。",
+        JSONObject(), emptyList())
+
+    fun pageEvalDecl(): JSONObject = rtDecl("page_eval", "【画布自检/修补】在画布页面内执行任意 JS 并返回结果。可用来测试交互（querySelector 找元素、.click() 模拟点击）、读取 DOM 状态、修补问题（改样式/补内容）。例：{\"js\":\"document.querySelectorAll('button').length\"}",
+        JSONObject().put("js", JSONObject().put("type", "string").put("description", "要执行的 JS 表达式（返回值需可直接序列化）")),
+        listOf("js"))
 
     fun runJsDecl(): JSONObject = rtDecl("run_js",
         "在 GenUI 内置 JS 引擎（Chromium）中真实执行 JavaScript。支持 async/await/fetch；console.log 输出与 return 返回值均回传。代码为函数体（自动包 async function）。适合计算、数据处理、算法验证、调外部 REST API。",
@@ -312,6 +443,7 @@ class BuiltinTools(private val context: Context) {
 
     /** 运行时工具声明（代码运行时 + 插件运行时），由 AgentLoop 并入 function calling */
     fun runtimeDeclarations(): JSONArray = JSONArray()
+        .put(runPyDecl())
         .put(runJsDecl())
         .put(pluginListDecl())
         .put(installPluginDecl())
@@ -319,6 +451,7 @@ class BuiltinTools(private val context: Context) {
 
     fun gateFor(name: String): String = when {
         name == "run_js" -> "code"
+        name == "run_python" -> "code"
         name.startsWith("plugin_") || name.startsWith("install_plugin") ||
             name.startsWith("uninstall_plugin") || name == "list_plugins" -> "plugin"
         name.startsWith("mcp_") -> "mcp"
@@ -328,6 +461,8 @@ class BuiltinTools(private val context: Context) {
         name.startsWith("location") -> "location"
         name.startsWith("file") -> "file"
         name.startsWith("calendar") -> "calendar"
+        name == "list_miniapps" || name == "open_miniapp" || name == "create_miniapp" -> "none"
+        name.startsWith("page_") || name.startsWith("log_") -> "none"
         name in listOf("web_search", "web_fetch") -> name
         name == "notify_send" -> "notify"
         name == "haptics" || name.startsWith("clipboard") -> name
@@ -351,6 +486,11 @@ class BuiltinTools(private val context: Context) {
     /** 设备实时状态：电量/充电/网络/存储/内存/音量/亮度 */
     private fun systemStatus(): JSONObject {
         val battery = com.genui.app.bridge.MoBridgeHost.deviceInfoStatic(context)
+        // Python 运行时真实状态（AI 自检"有没有 Python"用，不猜）
+        val pyProbe = runCatching { com.genui.app.agent.python.PyEngine.probeAvailable(context) }.getOrDefault(false)
+        val py = JSONObject()
+            .put("native_cpython314", if (pyProbe) "已内置（assets 标准库就绪，run_python 直接可用）" else "未打包")
+            .put("fallback", "Chaquopy CPython 3.12（run_python 自动降级可用）")
         val st = android.os.StatFs(android.os.Environment.getDataDirectory().path)
         val totalGB = st.blockCountLong * st.blockSizeLong / 1024.0 / 1024 / 1024
         val freeGB = st.availableBlocksLong * st.blockSizeLong / 1024.0 / 1024 / 1024
@@ -379,6 +519,7 @@ class BuiltinTools(private val context: Context) {
                 .put("used_pct", if (mi.totalMem > 0) ((mi.totalMem - mi.availMem) * 100 / mi.totalMem).toInt() else 0))
             .put("volume_pct", volPercent)
             .put("brightness", if (brightness >= 0) brightness * 100 / 255 else -1)
+            .put("python", py)
     }
 
     /** 手电筒：Camera2 无闪光灯权限时降级为提示 */
@@ -403,15 +544,62 @@ class BuiltinTools(private val context: Context) {
     private fun ttsSpeak(text: String): JSONObject {
         require(text.isNotBlank()) { "text 不能为空" }
         val clipped = text.take(500)
-        // 在主线程初始化并 speak（TTS 要求）
+        // 优先：能力模型 TTS 槽（HTTP TTS，音色/效果远超系统 TTS）；未配置 → 系统 TTS
+        val cfg = capStore.loadCapability("tts")
+        if (!cfg["baseUrl"].isNullOrBlank() && !cfg["model"].isNullOrBlank()) {
+            return runCatching {
+                val body = JSONObject().put("model", cfg["model"]).put("input", clipped)
+                    .put("voice", "alloy").put("response_format", "mp3")
+                val req = Request.Builder()
+                    .url(cfg["baseUrl"]!!.trimEnd('/') + "/audio/speech")
+                    .header("Authorization", "Bearer " + cfg["apiKey"])
+                    .header("Content-Type", "application/json")
+                    .post(body.toString().toRequestBody("application/json".toMediaType()))
+                    .build()
+                http.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        val sysOk = systemTtsSpeak(clipped)
+                        return JSONObject().put("ok", sysOk)
+                            .put("engine", "系统 TTS（HTTP TTS HTTP ${resp.code} 降级）")
+                            .put("chars", clipped.length)
+                    }
+                    val bytes = resp.body?.bytes() ?: ByteArray(0)
+                    if (bytes.isEmpty()) {
+                        val sysOk = systemTtsSpeak(clipped)
+                        return JSONObject().put("ok", sysOk).put("engine", "系统 TTS（空响应降级）")
+                    }
+                    val f = java.io.File(context.cacheDir, "tts_${System.currentTimeMillis()}.mp3")
+                    f.writeBytes(bytes)
+                    val mp = android.media.MediaPlayer()
+                    mp.setDataSource(f.absolutePath)
+                    mp.setOnCompletionListener { mp.release() }
+                    mp.prepare(); mp.start()
+                    JSONObject().put("ok", true).put("engine", "能力模型 TTS（${cfg["model"]}）")
+                        .put("chars", clipped.length)
+                }
+            }.getOrElse {
+                val sysOk = systemTtsSpeak(clipped)
+                JSONObject().put("ok", sysOk).put("engine", "系统 TTS（HTTP 异常降级：${it.message}）")
+            }
+        }
+        val sysOk = systemTtsSpeak(clipped)
+        return JSONObject().put("ok", sysOk).put("engine", "系统 TTS（可在能力模型配置 HTTP TTS）")
+            .put("chars", clipped.length)
+    }
+
+    /** 系统 TTS 播报（主线程 post），返回是否成功入队。 */
+    private fun systemTtsSpeak(text: String): Boolean {
+        var queued = false
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             runCatching {
                 val tts = android.speech.tts.TextToSpeech(context) { }
                 tts.language = java.util.Locale.CHINA
-                tts.speak(clipped, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "gen")
+                tts.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "gen")
+                queued = true
             }
         }
-        return JSONObject().put("ok", true).put("chars", clipped.length)
+        Thread.sleep(80)   // post 异步，稍候让主线程入队（简化同步）
+        return true
     }
 
     /** 系统分享面板 */
@@ -453,6 +641,240 @@ class BuiltinTools(private val context: Context) {
     }
 
     /** 查日历事件 */
+    /** 小程序根目录：filesDir/miniapps —— 与 MiniAppEngine.userAppsRoot 一致 */
+    private fun miniAppsRoot(): java.io.File =
+        java.io.File(context.filesDir, "miniapps").apply { mkdirs() }
+
+    private fun listMiniApps(): JSONObject {
+        val arr = org.json.JSONArray()
+        // 内置（assets/miniprograms）
+        runCatching {
+            context.assets.list("miniprograms")?.forEach { id ->
+                val cfg = try {
+                    context.assets.open("miniprograms/$id/app.json").bufferedReader().use { r -> r.readText() }
+                } catch (_: Exception) { "" }
+                val title = miniAppTitle(cfg, id)
+                arr.put(JSONObject().put("app_id", id).put("title", title).put("source", "内置"))
+            }
+        }
+        // 用户生成（filesDir/miniapps）
+        miniAppsRoot().listFiles { f -> f.isDirectory && java.io.File(f, "app.json").exists() }?.sortedBy { it.name }?.forEach { d ->
+            val cfg = runCatching { java.io.File(d, "app.json").readText() }.getOrDefault("")
+            val title = miniAppTitle(cfg, d.name)
+            arr.put(JSONObject().put("app_id", d.name).put("title", title).put("source", "你创建的"))
+        }
+        return JSONObject().put("apps", arr)
+            .put("hint", "用 open_miniapp 打开；用 create_miniapp 创建新的。")
+    }
+
+    // ---------- 画布自检三件套（page_preview / page_errors / page_eval） ----------
+
+    /** 截取画布当前渲染画面 → agent_files/preview_<ts>.png；视觉模型可用时自动自评 */
+    private fun pagePreview(): JSONObject {
+        val w = com.genui.app.agent.CanvasHub.web
+            ?: throw IllegalStateException("画布不存在（当前不在画布模式）")
+        val shotFile = kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                val bmp = android.graphics.Bitmap.createBitmap(
+                    w.width.coerceAtLeast(1), w.height.coerceAtLeast(1),
+                    android.graphics.Bitmap.Config.ARGB_8888)
+                val canvas = android.graphics.Canvas(bmp)
+                w.draw(canvas)
+                val dir = java.io.File(context.filesDir, "agent_files").apply { mkdirs() }
+                val f = java.io.File(dir, "preview_${System.currentTimeMillis()}.png")
+                f.outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 90, it) }
+                bmp.recycle()
+                f
+            }
+        }
+        val out = JSONObject()
+            .put("saved", "preview_${shotFile.name.removePrefix("preview_")}")
+            .put("file", shotFile.name)
+            .put("size_kb", shotFile.length() / 1024)
+        // 视觉模型可用 → 自动自评一步到位
+        val vision = runCatching { visionAnalyze(shotFile.name,
+            "这是 GenUI 画布渲染出的界面截图。简评：1) 布局是否完整正常 2) 内容是否充实（还是空壳/占位）3) 有无明显渲染问题（错位/空白/乱码）4) 一句话总评（可用/需修）。150 字内。")
+        }.getOrDefault(JSONObject().put("error", "视觉自评不可用"))
+        if (!vision.has("error") && vision.optString("analysis").isNotBlank()) {
+            out.put("visual_review", vision.optString("analysis"))
+        } else {
+            out.put("hint", "视觉模型未配置，无法自动看图。可调 page_eval 检查 DOM 内容完整性。")
+        }
+        return out
+    }
+
+    /** 读走画布积累的 JS 错误 */
+    private fun pageErrors(): JSONObject {
+        val errs = com.genui.app.agent.CanvasHub.drainErrors()
+        return JSONObject()
+            .put("count", errs.size)
+            .put("errors", org.json.JSONArray(errs))
+            .put("hint", if (errs.isEmpty()) "画布无 JS 错误记录" else "逐条修复后可用 page_eval 验证")
+    }
+
+    /** 画布内执行 JS：测试交互 / 读 DOM / 修补页面 */
+    private fun pageEval(js: String): JSONObject {
+        if (js.isBlank()) throw IllegalArgumentException("js 不能为空")
+        val result = kotlinx.coroutines.runBlocking {
+            com.genui.app.agent.CanvasHub.evaluate(js)
+        }
+        return JSONObject()
+            .put("result", if (result.length > 4000) result.take(4000) + "…(截断)" else result)
+            .put("note", "result 是 JSON 序列化值；「undefined」表示表达式无返回值")
+    }
+
+    // ---------- 执行日志（Markdown） ----------
+
+    private fun logWrite(text: String): JSONObject {
+        if (text.isBlank()) throw IllegalArgumentException("text 不能为空")
+        com.genui.app.agent.AgentLog.note(context, text.take(500))
+        return JSONObject().put("written", true)
+            .put("file", "agent_logs/" + java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.CHINA)
+                .format(java.util.Date()) + ".md")
+    }
+
+    private fun logRead(day: String): JSONObject {
+        val content = com.genui.app.agent.AgentLog.readDay(context, day)
+        val days = com.genui.app.agent.AgentLog.listDays(context).joinToString(", ") { it.first }
+        return JSONObject()
+            .put("day", day.ifBlank { java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.CHINA).format(java.util.Date()) })
+            .put("markdown", content.take(12000))
+            .put("available_days", days)
+    }
+
+    /** app.json → navigationBarTitleText（app.json 是标准 JSON，直接解析，不做正则） */
+    private fun miniAppTitle(cfg: String, fallback: String): String = runCatching {
+        JSONObject(cfg).optJSONObject("window")?.optString("navigationBarTitleText", fallback) ?: fallback
+    }.getOrDefault(fallback)
+
+    private fun openMiniApp(appId: String): JSONObject {
+        if (appId.isBlank()) throw IllegalArgumentException("app_id 不能为空")
+        val has = runCatching {
+            context.assets.list("miniprograms/$appId")?.isNotEmpty() == true
+        }.getOrDefault(false) || java.io.File(miniAppsRoot(), appId).let { it.isDirectory && java.io.File(it, "app.json").exists() }
+        if (!has) throw IllegalArgumentException("小程序不存在：$appId（可先 list_miniapps）")
+        val it = android.content.Intent(context, com.genui.app.miniapp.GenUiMiniAppActivity::class.java)
+            .putExtra("appId", appId)
+            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(it)
+        return JSONObject().put("opened", appId)
+    }
+
+    private fun createMiniApp(appId: String, args: JSONObject): JSONObject {
+        if (appId.isBlank() || !appId.matches(Regex("[a-z0-9_-]{2,32}")))
+            throw IllegalArgumentException("app_id 需为 2-32 位小写英文/数字/-/_")
+        val files = args.optJSONObject("files")
+            ?: throw IllegalArgumentException("files 缺失：需为 {路径: 内容} 映射")
+        val root = java.io.File(miniAppsRoot(), appId)
+        if (root.exists()) root.deleteRecursively()
+        val title = args.optString("title", appId)
+        // 无 app.json 时兜底生成（保证包结构可运行）
+        var hasJson = false
+        val keys = (0 until files.length()).map { files.names().getString(it) }
+        for (k in keys) {
+            val content = files.optString(k)
+            if (k.contains("..") || k.startsWith("/")) throw IllegalArgumentException("非法路径：$k")
+            val f = java.io.File(root, k)
+            f.parentFile?.mkdirs()
+            f.writeText(content)
+            if (k == "app.json") hasJson = true
+        }
+        if (!hasJson) {
+            java.io.File(root, "app.json").writeText(
+                """{"pages":["pages/index/index"],"window":{"navigationBarTitleText":"$title"}}""")
+            if (keys.none { it.startsWith("pages/index/index.") }) {
+                val p = java.io.File(root, "pages/index/index")
+                p.parentFile?.mkdirs()
+                p.resolve(".wxml").writeText("<view class=\"box\"><text class=\"tip\">$title</text></view>")
+                p.resolve(".wxss").writeText(".box{padding:40rpx}.tip{color:#d9a05b;font-size:32rpx}")
+                p.resolve(".js").writeText("Page({data:{}})")
+            }
+        } else {
+            // 标题统一写进 app.json
+            val cfgF = java.io.File(root, "app.json")
+            val cfg = cfgF.readText()
+            if (!cfg.contains("navigationBarTitleText")) {
+                cfgF.writeText(cfg.replaceFirst("{", "{\"window\":{\"navigationBarTitleText\":\"$title\"},"))
+            }
+        }
+        // ★ 创建时校验（v0.26.6 重写：校验器自身故障绝不能阻塞创建——v0.26.5 的
+        //   miniapp-sdk parseJson 返回 sealed class Json，被 as? Map 转换恒失败，导致合法
+        //   app.json 全部误报"缺 pages 数组"、创建 7 连败。原则：确定失败才打回，存疑放行。）
+        // ① app.json 可解析且 pages 非空（org.json，行为确定，fail-closed）
+        val cfgPath = java.io.File(root, "app.json")
+        if (!cfgPath.isFile) {
+            root.deleteRecursively()
+            throw IllegalArgumentException("缺 app.json（包结构必需）：{\"pages\":[\"pages/index/index\"],\"window\":{\"navigationBarTitleText\":\"标题\"}}")
+        }
+        val pages: List<String> = try {
+            val cfg = org.json.JSONObject(cfgPath.readText())
+            val arr = cfg.optJSONArray("pages")
+            if (arr == null || arr.length() == 0) {
+                root.deleteRecursively()
+                throw IllegalArgumentException("app.json 校验失败：缺 pages 数组或为空\n" +
+                    "标准结构：{\"pages\":[\"pages/index/index\"],\"window\":{\"navigationBarTitleText\":\"标题\"}}")
+            }
+            (0 until arr.length()).map { arr.getString(it) }
+        } catch (e: IllegalArgumentException) {
+            throw e
+        } catch (e: Exception) {
+            // JSON 内容本身读不了才到这——真坏，打回
+            root.deleteRecursively()
+            throw IllegalArgumentException("app.json 无法解析：${e.message?.take(200)}")
+        }
+        // ② 每个页面的 wxml/js 必须存在（wxss 可选；文件系统检查，零误杀）
+        for (p in pages) {
+            val missing = listOf("$p.wxml", "$p.js").filter { !java.io.File(root, it).isFile }
+            if (missing.isNotEmpty()) {
+                val names = keys.joinToString()
+                root.deleteRecursively()
+                throw IllegalArgumentException("页面文件缺失：${missing.joinToString()}（app.json pages 里声明了 $p）\n" +
+                    "已提供文件：$names\n补齐后重新调 create_miniapp。")
+            }
+        }
+        // ③ WXML 试解析：软校验（fail-open）——解析器误报不删包不打回，
+        //    警告随创建结果返回供 AI 自纠；坏 WXML 打开时引擎会自行报错
+        val wxmlWarnings = mutableListOf<String>()
+        for (wf in keys.filter { it.endsWith(".wxml") }.sorted()) {
+            try {
+                com.yuanbao.miniapp.view.WxmlParser().parse(java.io.File(root, wf).readText())
+            } catch (e: Exception) {
+                wxmlWarnings.add("WXML 解析警告 @$wf：${e.message?.take(200)}")
+            }
+        }
+        // ④ JS 语法预检：引擎级解析，只解析不执行（历史版本已验证无误杀，保留 fail-closed；
+        //    引擎自身崩溃等意外异常不视为代码错误，放行）
+        val engine = com.yuanbao.miniapp.core.MiniAppEngine.createEngine()
+        try {
+            for (jsf in keys.filter { it.endsWith(".js") }.sorted()) {
+                val code = java.io.File(root, jsf).readText()
+                val r = try {
+                    engine.evaluate("(function(){\n" + code + "\n})")
+                } catch (e: Exception) {
+                    null  // 引擎意外崩溃 ≠ 代码错误，放行
+                }
+                if (r != null && r.isError()) {
+                    val err = engine.lastError().take(300)
+                    root.deleteRecursively()
+                    throw IllegalArgumentException(
+                        "JS 语法错误 @$jsf：$err\n" +
+                        "自研引擎语法边界（与工具说明一致）：禁用模板字符串(反引号)/解构/展开(...)/默认参数/对象方法简写/class/async/await/可选链?./空值合并??；字符串拼接用 + ；对象写 {key: function(){}} 不写方法简写。修正后重新调 create_miniapp。")
+                }
+            }
+        } finally {
+            runCatching { engine.close() }
+        }
+        val ret = JSONObject().put("created", appId)
+            .put("root", root.absolutePath)
+            .put("files", org.json.JSONArray(keys))
+            .put("syntax", "checked")
+            .put("hint", "创建完成（app.json/页面完整性/JS 语法已校验通过），可直接 open_miniapp 打开给用户看。")
+        if (wxmlWarnings.isNotEmpty())
+            ret.put("warnings", org.json.JSONArray(wxmlWarnings))
+                .put("hint", ret.optString("hint") + " 注意存在 WXML 解析警告（不阻塞），建议检查标签闭合与 wx:for 语法。")
+        return ret
+    }
+
     private fun calendarQuery(days: Int): JSONObject {
         requireCalendarRead()
         val d = days.coerceIn(1, 90)
@@ -522,6 +944,29 @@ class BuiltinTools(private val context: Context) {
     }
 
     private fun deviceInfo(): JSONObject = com.genui.app.bridge.MoBridgeHost.deviceInfoStatic(context)
+
+    /**
+     * run_python：对齐 ZorvAI 的降级链 ——
+     * ① 原生 CPython 3.14（PEP 738 嵌入，完整 stdlib 含 C 扩展，首启解压 ~几秒）
+     * ② Chaquopy CPython 3.12（插件管理，stdlib 完整）
+     * 原生引擎级错误（不可用/初始化失败）才降级；用户代码报错照实返回不降级。
+     */
+    private fun runPython(code: String): JSONObject {
+        val py = com.genui.app.agent.python.PyEngine
+        if (py.probeAvailable(context)) {
+            val r = py.run(context, code)
+            // 引擎级错误且无任何输出 → 降级；用户代码 traceback 属正常结果
+            if (!(r.error != null && r.stdout.isBlank() && r.stderr.isBlank())) {
+                return JSONObject()
+                    .put("ok", r.error == null)
+                    .put("output", (r.stdout + if (r.stderr.isNotBlank()) "\n⚠️ " + r.stderr else "").trim().ifBlank { "（无输出）" })
+                    .put("engine", "CPython 3.14 原生嵌入")
+                    .let { if (r.error != null) it.put("error", r.error) else it }
+            }
+        }
+        val fallback = com.genui.app.agent.PyRuntime.run(context, code)
+        return fallback.put("engine", "CPython 3.12 · Chaquopy")
+    }
 
     private fun notifySend(title: String, body: String): JSONObject =
         com.genui.app.bridge.MoBridgeHost.notifyStatic(context, title, body)
@@ -634,6 +1079,105 @@ class BuiltinTools(private val context: Context) {
      * - 按 Content-Type 的 charset 正确解码（旧版只靠 string() 猜，中文常乱码）；
      * - 给出截断提示与重定向后的最终地址。
      */
+    /**
+     * 视觉理解：OpenAI 兼容 chat completions + image_url（base64/URL）。
+     * 「能力模型 → 视觉理解」未配置时如实报错引导，不静默降级。
+     */
+    private fun visionAnalyze(imageRef: String, question: String): JSONObject {
+        val cfg = capStore.loadCapability("vision")
+        if (cfg["baseUrl"].isNullOrBlank() || cfg["model"].isNullOrBlank())
+            return JSONObject().put("error", "视觉模型未配置。请到 设置 → 能力模型 → 视觉理解 填写端点/Key/模型后重试。")
+        return runCatching {
+            // 图片来源：http(s) 直接用 URL；否则当 agent_files 内文件读出 base64
+            val urlPart = if (imageRef.startsWith("http")) imageRef else {
+                val f = resolveAgentFile(imageRef)
+                    ?: return JSONObject().put("error", "找不到图片：$imageRef（agent_files 内无此文件，也不是 URL）")
+                val mime = when (f.extension.lowercase()) {
+                    "png" -> "image/png"; "webp" -> "image/webp"; "gif" -> "image/gif"; else -> "image/jpeg"
+                }
+                "data:$mime;base64," + android.util.Base64.encodeToString(f.readBytes(), android.util.Base64.NO_WRAP)
+            }
+            val content = org.json.JSONArray()
+                .put(JSONObject().put("type", "text").put("text", question.ifBlank { "描述这张图片" }))
+                .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", urlPart)))
+            val body = JSONObject()
+                .put("model", cfg["model"])
+                .put("messages", org.json.JSONArray().put(JSONObject().put("role", "user").put("content", content)))
+                .put("max_tokens", 800)
+            val req = Request.Builder()
+                .url(cfg["baseUrl"]!!.trimEnd('/') + "/chat/completions")
+                .header("Authorization", "Bearer " + cfg["apiKey"])
+                .header("Content-Type", "application/json")
+                .post(body.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            http.newCall(req).execute().use { resp ->
+                val text = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful)
+                    return JSONObject().put("error", "视觉模型 HTTP ${resp.code}：${text.take(200)}")
+                val msg = org.json.JSONObject(text).optJSONArray("choices")?.optJSONObject(0)
+                    ?.optJSONObject("message")?.optString("content").orEmpty()
+                JSONObject().put("answer", msg.ifBlank { "（视觉模型返回空）" })
+                    .put("model", cfg["model"])
+            }
+        }.getOrElse { JSONObject().put("error", "视觉调用失败：${it.message}") }
+    }
+
+    /** agent_files 内按文件名/模糊匹配解析文件（"news.png"、"1_news.png" 等形式都可命中） */
+    private fun resolveAgentFile(ref: String): java.io.File? {
+        val dir = java.io.File(context.filesDir, "agent_files")
+        val exact = java.io.File(dir, ref)
+        if (exact.exists()) return exact
+        return dir.listFiles()?.firstOrNull { it.name.endsWith(ref) || it.name.contains(ref) }
+    }
+
+    /**
+     * 图片生成：标准 OpenAI images/generations（b64_json 或 url 响应都兼容）。
+     * 生成图保存到 agent_files，返回路径供展示/file_read。
+     */
+    private fun imageGenerate(prompt: String): JSONObject {
+        val cfg = capStore.loadCapability("imageGen")
+        if (cfg["baseUrl"].isNullOrBlank() || cfg["model"].isNullOrBlank())
+            return JSONObject().put("error", "图片生成模型未配置。请到 设置 → 能力模型 → 图片生成 填写端点/Key/模型后重试。")
+        if (prompt.isBlank()) return JSONObject().put("error", "prompt 不能为空")
+        return runCatching {
+            val body = JSONObject()
+                .put("model", cfg["model"]).put("prompt", prompt)
+                .put("n", 1).put("response_format", "b64_json")
+            val req = Request.Builder()
+                .url(cfg["baseUrl"]!!.trimEnd('/') + "/images/generations")
+                .header("Authorization", "Bearer " + cfg["apiKey"])
+                .header("Content-Type", "application/json")
+                .post(body.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            http.newCall(req).execute().use { resp ->
+                val text = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful)
+                    return JSONObject().put("error", "图片生成 HTTP ${resp.code}：${text.take(200)}")
+                val root = org.json.JSONObject(text)
+                val item = root.optJSONArray("data")?.optJSONObject(0)
+                val b64 = item?.optString("b64_json").orEmpty()
+                val remoteUrl = item?.optString("url").orEmpty()
+                val bytes: ByteArray = when {
+                    b64.isNotBlank() -> runCatching {
+                        android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
+                    }.getOrDefault(ByteArray(0))
+                    remoteUrl.startsWith("http") ->
+                        http.newCall(Request.Builder().url(remoteUrl).build()).execute().use { r2 ->
+                            if (r2.isSuccessful) r2.body?.bytes() ?: ByteArray(0) else ByteArray(0)
+                        }
+                    else -> ByteArray(0)
+                }
+                if (bytes.isEmpty()) return JSONObject().put("error", "生成响应里没有图片数据：${text.take(200)}")
+                val dir = java.io.File(context.filesDir, "agent_files").apply { mkdirs() }
+                val f = java.io.File(dir, "gen_${System.currentTimeMillis()}.png")
+                f.writeBytes(bytes)
+                JSONObject().put("ok", true).put("path", f.absolutePath)
+                    .put("bytes", bytes.size)
+                    .put("hint", "图片已保存，可在对话中让用户打开查看（或用 web_fetch 展示 URL 时引用此文件）。")
+            }
+        }.getOrElse { JSONObject().put("error", "图片生成失败：${it.message}") }
+    }
+
     private fun webFetch(url: String, maxChars: Int): JSONObject {
         val target = url.trim()
         if (!target.startsWith("http://") && !target.startsWith("https://"))

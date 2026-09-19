@@ -26,7 +26,7 @@ import com.genui.app.ui.theme.GenTheme
  * 权 → 工具权限
  * 模 → 模型服务
  */
-enum class SettingsItem {
+enum class SettingsItem { CapabilityModels,
     Soul, Memory, Perms, ModelConfig, Mcp
 }
 
@@ -63,7 +63,8 @@ fun SettingsScreen(
                 SettingsItem.Memory to ("记忆库" to "长期知识与偏好管理"),
                 SettingsItem.Perms to ("工具权限" to "系统权限与 Agent 门禁"),
                 SettingsItem.ModelConfig to ("模型服务" to "供应商、分派与采样参数"),
-                SettingsItem.Mcp to ("MCP 服务器" to "连接外部工具协议服务器（MCP）")
+                SettingsItem.Mcp to ("MCP 服务器" to "连接外部工具协议服务器（MCP）"),
+                SettingsItem.CapabilityModels to ("能力模型" to "视觉/图生成/TTS/STT/声音克隆/音视频通话")
             )
             items.forEach { (item, labelDesc) ->
                 val (label, desc) = labelDesc
@@ -81,6 +82,7 @@ fun SettingsScreen(
                             SettingsItem.Perms -> "✓"
                             SettingsItem.ModelConfig -> "⚙"
                             SettingsItem.Mcp -> "⇄"
+                            SettingsItem.CapabilityModels -> "◈"
                         },
                         color = GenTheme.AmberDim, fontSize = 18.sp,
                         fontFamily = FontFamily.Monospace,

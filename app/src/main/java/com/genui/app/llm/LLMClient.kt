@@ -222,7 +222,8 @@ class LLMClient {
         onChunk: (String) -> Unit,
         onDone: (String) -> Unit,
         onError: (String) -> Unit,
-        onReasoning: (String) -> Unit = {}
+        onReasoning: (String) -> Unit = {},
+        onLengthCutoff: (() -> Unit)? = null
     ) {
         cancelled = false
         withContext(Dispatchers.IO) {
@@ -238,6 +239,8 @@ class LLMClient {
                 val body = JSONObject().put("model", provider.model).put("messages", msgs)
                     .put("stream", true)
                     .let { applySampling(it, provider) }
+                    // 显式传 max_tokens：不传则服务端默认（常为 4096）会把长 HTML 截成半截还报"完成"
+                    .let { if (provider.maxTokens > 0) it.put("max_tokens", provider.maxTokens) else it }
                 val call = when (provider.protocol) {
                     Protocol.OPENAI -> Request.Builder()
                         .url(provider.baseUrl.trimEnd('/') + "/chat/completions")
@@ -253,6 +256,7 @@ class LLMClient {
                     }
                     val source = resp.body!!.source()
                     val full = StringBuilder()
+                    var lengthCutoff = false
                     while (!cancelled) {
                         val line = source.readUtf8Line() ?: break
                         if (line.startsWith("data:")) {
@@ -264,8 +268,13 @@ class LLMClient {
                             }
                             if (delta != null) { full.append(delta); onChunk(delta) }
                             parseReasoningChunk(payload, provider.protocol)?.let { onReasoning(it) }
+                            // finish_reason=length：服务端按 max_tokens 截断——上游可触发自动续写。
+                            // 正则兼容带空格的返回；部分中转标成 "stop"，结构兜底在 AgentLoop（</html> 检测）
+                            if (Regex("\"finish_reason\"\\s*:\\s*\"length\"").containsMatchIn(payload))
+                                lengthCutoff = true
                         }
                     }
+                    if (lengthCutoff) onLengthCutoff?.invoke()
                     onDone(full.toString())
                 }
             } catch (e: Exception) {

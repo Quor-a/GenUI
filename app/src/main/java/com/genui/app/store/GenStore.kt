@@ -64,6 +64,44 @@ class GenStore(context: Context) {
         cfgFile.writeText(base.toString())
     }
 
+    // ---------- 能力模型注册表（视觉/图生成/视频生成/TTS/STT/声音克隆/视频通话/语音通话） ----------
+    // 每个能力槽可独立配置 OpenAI 兼容端点；工具在运行时读取对应槽位驱动调用。
+    // 未配置的槽位=该能力不可用，工具如实报错并引导去「能力模型」页配置。
+    val CAP_SLOTS = listOf(
+        "vision", "imageGen", "videoGen", "tts",
+        "stt", "voiceClone", "videoCall", "voiceCall"
+    )
+    val CAP_LABELS = mapOf(
+        "vision" to "视觉理解", "imageGen" to "图片生成", "videoGen" to "视频生成",
+        "tts" to "语音合成 TTS", "stt" to "语音识别 STT", "voiceClone" to "声音克隆",
+        "videoCall" to "视频通话", "voiceCall" to "语音通话"
+    )
+
+    fun capFile() = File(dir, "capability_models.json")
+
+    fun loadCapability(slot: String): Map<String, String> = runCatching {
+        val arr = org.json.JSONArray(capFile().readText())
+        (0 until arr.length()).map { arr.getJSONObject(it) }
+            .firstOrNull { it.optString("slot") == slot }
+            ?.let { mapOf("baseUrl" to it.optString("baseUrl"), "apiKey" to it.optString("apiKey"),
+                "model" to it.optString("model"), "protocol" to it.optString("protocol", "openai")) }
+            ?: emptyMap()
+    }.getOrDefault(emptyMap())
+
+    @Synchronized
+    fun saveCapability(slot: String, baseUrl: String, apiKey: String, model: String, protocol: String = "openai", enabled: Boolean = true) {
+        val arr = runCatching { org.json.JSONArray(capFile().readText()) }.getOrDefault(org.json.JSONArray())
+        val kept = org.json.JSONArray()
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            if (o.optString("slot") != slot) kept.put(o)
+        }
+        kept.put(org.json.JSONObject()
+            .put("slot", slot).put("baseUrl", baseUrl).put("apiKey", apiKey)
+            .put("model", model).put("protocol", protocol).put("enabled", enabled))
+        capFile().writeText(kept.toString())
+    }
+
     // ---------- 当前对话模式（GenUI 生成界面 / 标准 Agent 对话） ----------
 
     /** 对话模式：ui = GenUI 一句话生成界面；agent = 标准 Agent 多轮对话。默认 ui。 */
@@ -78,6 +116,71 @@ class GenStore(context: Context) {
         }
         runCatching { File(dir, "chatlog.json").writeText(arr.toString()) }
     }
+
+
+    private val sessionsDir: File get() = File(dir, "sessions").apply { mkdirs() }
+
+    // —— 小程序画布栈（与 HTML 画面并列，出现在历史浏览里） ——
+    private val miniAppPagesFile: File get() = File(dir, "pages_miniapp.json")
+
+    fun loadMiniAppPages(): List<String> = runCatching {
+        val arr = org.json.JSONArray(miniAppPagesFile.readText())
+        (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotBlank() }
+    }.getOrDefault(emptyList())
+
+    fun appendMiniAppPage(appId: String) {
+        if (appId.isBlank()) return
+        runCatching {
+            val arr = if (miniAppPagesFile.exists()) org.json.JSONArray(miniAppPagesFile.readText()) else org.json.JSONArray()
+            arr.put(appId)
+            miniAppPagesFile.writeText(arr.toString())
+        }
+    }
+
+    fun clearMiniAppPages() { runCatching { miniAppPagesFile.delete() } }
+
+    /** 把当前对话（chatlog.json）归档到 sessions/<ts>.json（新建对话时保留历史） */
+    fun archiveChatLog(): Boolean {
+        val f = File(dir, "chatlog.json")
+        if (!f.exists()) return false
+        val entries = loadChatLog()
+        if (entries.isEmpty()) { f.delete(); return false }
+        val title = entries.firstOrNull { it.role == "user" }?.text?.lineSequence()?.firstOrNull()?.take(18) ?: "对话"
+        return runCatching {
+            sessionsDir.resolve("${System.currentTimeMillis()}.json").writeText(
+                org.json.JSONObject()
+                    .put("title", title)
+                    .put("ts", entries.lastOrNull()?.ts ?: System.currentTimeMillis())
+                    .put("entries", org.json.JSONArray(f.readText()))
+                    .toString())
+            f.delete()
+            true
+        }.getOrDefault(false)
+    }
+
+    data class ChatArchive(val file: java.io.File, val title: String, val ts: Long, val count: Int)
+
+    fun listChatArchives(): List<ChatArchive> = runCatching {
+        sessionsDir.listFiles { f -> f.name.endsWith(".json") }?.map { f ->
+            runCatching {
+                val o = org.json.JSONObject(f.readText())
+                ChatArchive(f, o.optString("title", "对话"), o.optLong("ts", 0), o.optJSONArray("entries")?.length() ?: 0)
+            }.getOrElse { ChatArchive(f, f.name, 0, 0) }
+        }?.sortedByDescending { it.ts } ?: emptyList()
+    }.getOrDefault(emptyList())
+
+    /** 恢复归档为当前对话：当前对话先归档，选中归档移回 chatlog.json（会话在两者间移动，不重复） */
+    fun restoreChatArchive(src: java.io.File): List<ChatLogEntry> {
+        if (loadChatLog().isNotEmpty()) archiveChatLog()
+        return runCatching {
+            val arr = org.json.JSONObject(src.readText()).optJSONArray("entries") ?: org.json.JSONArray()
+            File(dir, "chatlog.json").writeText(arr.toString())
+            src.delete()
+            loadChatLog()
+        }.getOrDefault(emptyList())
+    }
+
+    fun deleteChatArchive(f: java.io.File) { runCatching { f.delete() } }
 
     fun loadChatLog(): List<ChatLogEntry> = runCatching {
         val f = File(dir, "chatlog.json")

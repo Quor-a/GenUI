@@ -1,5 +1,8 @@
 package com.genui.app.ui.shell
 
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import android.annotation.SuppressLint
 import android.webkit.WebView
 import android.webkit.WebResourceRequest
@@ -10,20 +13,29 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.NoteAdd
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.*
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.lazy.items as lazyItems
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -107,7 +119,7 @@ sealed interface NativeRender {
  * 这里是全 App 仅有的"内置 UI"，WebView 内的一切皆由 AI 写出。
  */
 /** 主屏可达的子系统导航目标 */
-enum class NavTarget { Soul, Memory, Perms, ModelConfig, Mcp, Settings }
+enum class NavTarget { Soul, Memory, Perms, ModelConfig, Mcp, CapabilityModels, Settings }
 
 /**
  * 生成阶段 —— 状态行的语义骨架。
@@ -169,6 +181,12 @@ fun GenScaffold(
     var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
     // 顶部导航聚合菜单
     var showQuickNav by remember { mutableStateOf(false) }
+    // 历史对话列表（归档会话回看/切换）
+    var showChatHistory by remember { mutableStateOf(false) }
+    // 小程序列表（MiniAppEngine：内置示例 + AI 生成）
+    var showMiniApps by remember { mutableStateOf(false) }
+    // 执行日志（Markdown 按天）
+    var showLogs by remember { mutableStateOf(false) }
     // 抖音式历史浏览（全屏上下滑动翻看已生成的界面）
     var browsing by remember { mutableStateOf(false) }
     // 本轮生成共享的"当前运行条目"槽位（跨回调记忆位置）
@@ -206,6 +224,34 @@ fun GenScaffold(
     var nativePopup by remember { mutableStateOf<Pair<String, String>?>(null) }
     // 跨模式共享的对话历史（绑定：切换不丢上下文）
     val chatLog = remember { mutableStateListOf<ChatMsg>() }
+    /** max_tokens 截断自动续写计数（防无限循环，上限 2 次；新提示词重置） */
+    val autoContCount = remember { mutableStateOf(0) }
+    /** 决策轮"思考中"占位气泡 id（真气泡/工具卡出现即移除） */
+    val PENDING_THINKING_ID = "_pending_thinking"
+    // —— 输入框附件：图片 vision + 任意文件落盘 ——
+    val pendingAttach = remember { mutableStateListOf<com.genui.app.agent.Attach>() }
+    fun handlePick(uri: android.net.Uri) {
+        runCatching {
+            val cr = ctx.contentResolver
+            val mime = cr.getType(uri) ?: "application/octet-stream"
+            val name = cr.query(uri, null, null, null, null)?.use { c ->
+                val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (c.moveToFirst() && idx >= 0) c.getString(idx) else null
+            } ?: "file_${System.currentTimeMillis()}"
+            val safe = name.replace(Regex("[/\\\\]"), "_")
+            val dir = java.io.File(ctx.filesDir, "agent_files").apply { mkdirs() }
+            val dst = java.io.File(dir, System.currentTimeMillis().toString() + "_" + safe)
+            cr.openInputStream(uri)?.use { ins -> dst.outputStream().use { ins.copyTo(it) } }
+            pendingAttach.add(com.genui.app.agent.Attach(
+                safe, mime, dst.absolutePath, dst.length(), mime.startsWith("image/")))
+        }.onFailure { scope.launch { snackbar.showSnackbar("附件读取失败：${it.message}") } }
+    }
+    val imagePicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()
+    ) { uri -> uri?.let(::handlePick) }
+    val filePicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri -> uri?.let(::handlePick) }
     // 画布历史导航栈：前移至此声明——ensureSession 的回调（onUiDetected）也要入栈
     val canvasStack = remember { mutableStateListOf<GeneratedPage>() }
     // 对话历史持久化：启动恢复 + 每次变更落盘（重启不丢）
@@ -232,7 +278,10 @@ fun GenScaffold(
             chatSession.value = ChatSession(
                 store = store,
                 onUserMsg = { /* 用户气泡由 chat() 直接加入 chatLog，避免重复 */ },
-                onAssistantStart = { id -> chatLog.add(ChatMsg(id, "assistant", "", false)) },
+                onAssistantStart = { id ->
+                    chatLog.removeAll { it.id == PENDING_THINKING_ID }
+                    chatLog.add(ChatMsg(id, "assistant", "", false))
+                },
                 onAssistantDelta = { id, d ->
                     val i = chatLog.indexOfFirst { it.id == id }
                     if (i >= 0) chatLog[i] = chatLog[i].copy(text = chatLog[i].text + d)
@@ -241,24 +290,50 @@ fun GenScaffold(
                     val i = chatLog.indexOfFirst { it.id == id }
                     if (i >= 0) chatLog[i] = chatLog[i].copy(done = true)
                 },
+                onReasoningComplete = { id, text, ms ->
+                    val i = chatLog.indexOfFirst { it.id == id }
+                    if (i >= 0) chatLog[i] = chatLog[i].copy(reasoning = text, reasoningMs = ms)
+                },
+                onThinking = { s ->
+                    if (phase != Phase.Rendering) phaseDetail = s
+                    // 决策轮反馈：chatOnce 非流式，思考期间消息流此前零反馈——
+                    // pending "思考中"气泡补位（有真气泡/工具卡时自动让位）
+                    if (s == "思考中…") {
+                        if (chatLog.lastOrNull()?.id != PENDING_THINKING_ID) {
+                            chatLog.removeAll { it.id == PENDING_THINKING_ID }
+                            chatLog.add(ChatMsg(PENDING_THINKING_ID, "assistant", "", false))
+                        }
+                    } else {
+                        chatLog.removeAll { it.id == PENDING_THINKING_ID }
+                    }
+                },
                 onToolStart = { id, name, brief ->
                     chatLog.add(ChatMsg(id, "tool", "⚙ $name($brief)…", false,
                         tool = com.genui.app.agent.ToolTrace(name = name, brief = brief)))
                 },
                 onToolResult = { id, result, ms, ok ->
                     val i = chatLog.indexOfFirst { it.id == id }
-                    if (i >= 0) chatLog[i] = chatLog[i].copy(
-                        // ChatSession 已人类可读化（摘要+耗时），不再二次截断
-                        text = result,
-                        done = true,
-                        tool = chatLog[i].tool?.copy(
-                            ms = ms, isError = !ok,
-                            denied = result.startsWith("已拒绝"))
-                    )
+                    if (i >= 0) {
+                        // —— 终端纠偏（第二道防线）：返回里有有效数据就不许标红 ——
+                        // ChatSession/AgentLoop 已判定 ok，这里再验一次：text 含
+                        // "N 条结果/命中 N 条" 等成功特征时强制 isError=false（v0.18.5 曾现判定与数据矛盾的截图）
+                        val successMark = Regex("(条结果|条新闻|命中 \\d+ 条|管线|✅)")
+                        val hasData = result.contains("\"results\"") || result.contains("\"citations\"") ||
+                            result.contains("\"items\"") || successMark.containsMatchIn(result) || ok
+                        val realErr = !(ok || hasData)
+                        chatLog[i] = chatLog[i].copy(
+                            // ChatSession 已人类可读化（摘要+耗时），不再二次截断
+                            text = result,
+                            done = true,
+                            tool = chatLog[i].tool?.copy(
+                                ms = ms, isError = realErr,
+                                denied = result.startsWith("已拒绝"))
+                        )
+                    }
                 },
-                onThinking = { s -> if (phase != Phase.Rendering) phaseDetail = s },
                 onError = { msg ->
                     scope.launch {
+                        chatLog.removeAll { it.id == PENDING_THINKING_ID }
                         // 出错必须落在会话里：此前失败轮在聊天记录一片死寂，
                         // 未完成的气泡永远停在"流式中"，用户只能看到一闪而过的 snackbar
                         val i = chatLog.indexOfFirst { it.role == "assistant" && !it.done }
@@ -266,6 +341,24 @@ fun GenScaffold(
                         chatLog.add(ChatMsg(
                             java.util.UUID.randomUUID().toString().take(8), "error", msg, true))
                         snackbar.showSnackbar(msg)
+                    }
+                },
+                onMiniApp = { appId ->
+                    scope.launch {
+                        // 交付说明（对话流有文字交代）+ 内嵌小程序卡片
+                        chatLog.add(ChatMsg(GenStore.newId(), "assistant",
+                            "已创建小程序「$appId」。对话卡片与画布内均可直接试玩；点「源码」看实现。", true))
+                        chatLog.add(ChatMsg(GenStore.newId(), "miniapp", appId, true))
+                        store.appendMiniAppPage(appId)
+                        stackCount = store.loadPages().size + store.loadMiniAppPages().size
+                    }
+                },
+                onA2ui = { jsonl, sid ->
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        // A2UI 官方引擎全屏渲染（生成式 UI 的安卓原生形态）+ 对话流说明
+                        chatLog.add(ChatMsg(GenStore.newId(), "assistant",
+                            "已生成 A2UI 原生界面（谷歌官方引擎渲染），正在打开。", true))
+                        a2uiSurface = sid to jsonl
                     }
                 },
                 onUiDetected = { html ->
@@ -280,7 +373,7 @@ fun GenScaffold(
                         canvasStack.removeAll { it.id == page.id }
                         canvasStack.add(page)
                         while (canvasStack.size > 30) canvasStack.removeAt(0)
-                        stackCount = store.loadPages().size
+                        stackCount = store.loadPages().size + store.loadMiniAppPages().size
                     }
                 },
                 onAskPermission = { tool, briefArg, level ->
@@ -328,6 +421,8 @@ fun GenScaffold(
 
     // —— 原生组件：AI 页面经 MoBridge.ui.widget 唤起，Compose BottomSheet 渲染，结果回写页面 ——
     var nativeWidget by remember { mutableStateOf<Pair<String, String>?>(null) }
+    // 小程序画布内嵌层：create_miniapp 成功后画布直接渲染可交互小程序本体（不跳独立程序）
+    var miniAppSurface by remember { mutableStateOf<String?>(null) }
     nativeWidget?.let { (kind, payload) ->
         if (kind == "popup") {
             val k = runCatching { JSONObject(payload).optString("kind") }.getOrDefault("stat")
@@ -408,7 +503,7 @@ fun GenScaffold(
                 Column(Modifier.fillMaxWidth()) {
                     ModeRow(
                         title = "GenUI 生成界面",
-                        desc = "一句话 → AI 写整个可交互界面（HTML / 原生渲染）",
+                        desc = "一句话 → AI 写整个可交互界面（HTML / 原生渲染 / 小程序）",
                         selected = chatMode == "ui"
                     ) { showModeDialog = false; switchMode("ui") }
                     Spacer(Modifier.height(8.dp))
@@ -490,6 +585,7 @@ fun GenScaffold(
      * @param seed 续写种子：非空时把它作为已有内容写回画布，模型续写其后。
      */
     suspend fun generate(prompt: String, seed: String? = null) {
+        if (seed == null) autoContCount.value = 0
         val provider = cachedProvider ?: run {
             snackbar.showSnackbar("尚未配置模型服务：先到「模型服务」里添加一个供应商")
             return
@@ -498,6 +594,7 @@ fun GenScaffold(
         startedAt = System.currentTimeMillis()
         timeline.clear()
         canvasPeek = false
+        com.genui.app.agent.AgentExecutionService.start(ctx, "界面生成中")
         // 生成模式也留对话痕迹：本轮指令进对话流，Agent 的文字回答才有上下文可挂
         chatLog.add(ChatMsg(GenStore.newId(), "user", prompt, true))
         // 新一轮生成：清掉上一屏的原生渲染层，避免它与流式内容叠加打架
@@ -516,6 +613,7 @@ fun GenScaffold(
         val agent = AgentLoop(
             context = ctx,
             store = store,
+            onMiniAppCanvas = { id -> main.post { miniAppSurface = id } },
             // onStatus 承载的是粗粒度人类文案，把它降级为细节行；阶段语义由 onEvent 负责
             onStatus = { s -> main.post { if (!building || phase != Phase.Rendering) phaseDetail = s } },
             onHtmlDelta = { delta ->
@@ -534,6 +632,12 @@ fun GenScaffold(
                         phase = p; phaseDetail = d
                         if (tc > 0) toolCalls = tc
                         if (el > 0) lastElapsed = el
+                    }
+                    // 交付写进对话流：切到对话框能看见 AI 这次干了什么（不只是画布默默换页）
+                    if (ev is com.genui.app.agent.AgentEvent.Finished) {
+                        chatLog.add(ChatMsg(GenStore.newId(), "assistant",
+                            "已生成界面「${ev.title}」——${ev.bytes / 1024}KB，${ev.toolCalls} 次工具调用，" +
+                                "耗时 ${ev.elapsedMs / 1000.0}s。画布上可直接交互；历史版本在 ≡ → 栈 里回看。", true))
                     }
                     // 纯问答：文字进对话气泡，对话面板让位给用户看画布前先看到回答
                     if (ev is com.genui.app.agent.AgentEvent.TextAnswer) {
@@ -568,13 +672,26 @@ fun GenScaffold(
                     val page = GeneratedPage(GenStore.newId(), title, full, provider.model, System.currentTimeMillis())
                     store.appendPage(page)
                     pushPage(page)
-                    stackCount = store.loadPages().size
+                    stackCount = store.loadPages().size + store.loadMiniAppPages().size
                     partialHtml = null
                     // —— 渲染通道分派 ——
                     // AI 声明了 xml / compose 通道时，把画布上方交给真实原生渲染。
                     // 不影响 HTML 部分：网页继续承载整体排版，原生块叠在其上。
                     restoreNative(full)
+                    com.genui.app.agent.AgentExecutionService.stop(ctx)
                     phase = Phase.Done
+                    // —— max_tokens 截断自动续写（≤2 次）：服务端 length 截断的 HTML 走 seed 续写补完 ——
+                    if (agent.lengthCutoff && full.length < 180_000 && autoContCount.value < 2) {
+                        autoContCount.value++
+                        partialHtml = full
+                        scope.launch {
+                            kotlinx.coroutines.delay(600)
+                            generate(prompt, seed = full)
+                            partialHtml = null   // 自动续写已接手，撤掉"上次中断"手动恢复卡（两者并存自相矛盾）
+                        }
+                        scope.launch { snackbar.showSnackbar("内容较长被模型截断，已自动续写（第 ${autoContCount.value} 次）…") }
+                        return@post
+                    }
                     phaseDetail = "「$title」· ${(full.length / 1024.0).format1()}KB" +
                         if (lastChannel != "html") " · 原生 $lastChannel" else ""
                     building = false
@@ -590,6 +707,7 @@ fun GenScaffold(
                     phase = Phase.Failed
                     phaseDetail = msg.take(80)
                     building = false
+                    com.genui.app.agent.AgentExecutionService.stop(ctx)
                     scope.launch { snackbar.showSnackbar(msg) }
                 }
             }
@@ -600,7 +718,7 @@ fun GenScaffold(
      * 标准 Agent 对话模式：多轮聊天、流式气泡、可调用工具，不生成界面。
      * 走 [ensureSession] 维护的 [ChatSession]，对话历史跨轮保留、跨模式绑定。
      */
-    suspend fun chat(prompt: String) {
+    suspend fun chat(prompt: String, attachments: List<com.genui.app.agent.Attach> = emptyList()) {
         val provider = cachedProvider ?: run {
             snackbar.showSnackbar("尚未配置模型服务：先到「模型服务」里添加一个供应商")
             return
@@ -615,9 +733,18 @@ fun GenScaffold(
             chatLog.filter { (it.role == "user" || it.role == "assistant") && it.done }
                 .map { it.role to it.text }
         )
-        chatLog.add(ChatMsg(GenStore.newId(), "user", prompt, true))
-        s.addUser(prompt)
-        s.run(provider)
+        val attachNote = if (attachments.isNotEmpty())
+            " " + attachments.joinToString(" ") { if (it.isImage) "[图片:${it.name}]" else "[文件:${it.name}]" } else ""
+        chatLog.add(ChatMsg(GenStore.newId(), "user", prompt + attachNote, true,
+            attachments = attachments))
+        s.addUser(prompt, attachments)
+        // 前台服务保活：进后台不被 ROM 冻结/断网（此前挂后台即断流）
+        com.genui.app.agent.AgentExecutionService.start(ctx, "Agent 对话执行中")
+        try {
+            s.run(provider)
+        } finally {
+            com.genui.app.agent.AgentExecutionService.stop(ctx)
+        }
         building = false
         phase = Phase.Idle
         phaseDetail = "Agent 对话"
@@ -635,8 +762,23 @@ fun GenScaffold(
                     .padding(horizontal = 14.dp, vertical = 9.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // 品牌章：极简字标，替代裸图标
-                    Text(
+                    // 品牌章：优先显示上传的 AI 头像；无头像退回字标
+                    val avatarF = java.io.File(ctx.filesDir, "soul_avatar.jpg")
+                    val brandBmp = if (avatarF.exists()) runCatching {
+                        val bo = android.graphics.BitmapFactory.Options()
+                        bo.inJustDecodeBounds = true
+                        android.graphics.BitmapFactory.decodeFile(avatarF.absolutePath, bo)
+                        bo.inSampleSize = maxOf(1, bo.outWidth / 96)
+                        bo.inJustDecodeBounds = false
+                        android.graphics.BitmapFactory.decodeFile(avatarF.absolutePath, bo)
+                    }.getOrNull() else null
+                    if (brandBmp != null) {
+                        androidx.compose.foundation.Image(
+                            bitmap = brandBmp.asImageBitmap(), contentDescription = "AI 头像",
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(RoundedCornerShape(6.dp)))
+                    } else Text(
                         soul.name.take(1),
                         color = GenTheme.Screen, fontSize = 11.sp, fontFamily = FontFamily.Serif,
                         modifier = Modifier
@@ -731,6 +873,18 @@ fun GenScaffold(
                                     browsing = true
                                     showQuickNav = false
                                 },
+                                Triple("话", "") {
+                                    showChatHistory = true
+                                    showQuickNav = false
+                                },
+                                Triple("程序", "") {
+                                    showMiniApps = true
+                                    showQuickNav = false
+                                },
+                                Triple("志", "") {
+                                    showLogs = true
+                                    showQuickNav = false
+                                },
                                 Triple("设置", "") {
                                     onNavigate(NavTarget.Settings)
                                     showQuickNav = false
@@ -760,6 +914,9 @@ fun GenScaffold(
                                         Text(
                                             when (label) {
                                                 "栈" -> "◱"
+                                                "话" -> "❉"
+                                                "程序" -> "▦"
+                                                "志" -> "✎"
                                                 "魂" -> "◎"
                                                 "记" -> "✦"
                                                 "权" -> "✓"
@@ -829,6 +986,30 @@ fun GenScaffold(
                         }
                     }
                 }
+                // —— 附件预览 chips：输入框上方，点 × 移除 ——
+                if (pendingAttach.isNotEmpty()) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        pendingAttach.forEach { a ->
+                            Row(
+                                Modifier.background(GenTheme.Panel, RoundedCornerShape(8.dp))
+                                    .clickable { pendingAttach.remove(a) }
+                                    .padding(horizontal = 8.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(if (a.isImage) "🖼" else "📄", fontSize = 11.sp)
+                                Spacer(Modifier.width(4.dp))
+                                Text(a.name, color = GenTheme.Text, fontSize = 11.sp,
+                                    maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    modifier = Modifier.widthIn(max = 120.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("×", color = GenTheme.Dim, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
                 // 中断留下的半成品：给一条续写入口，而不是让用户重头再来
                 partialHtml?.let { seed ->
                     Row(
@@ -875,7 +1056,7 @@ fun GenScaffold(
                     }
                     Spacer(Modifier.weight(1f))
                     Text(
-                        if (chatMode == "agent") "多轮对话 · 可调用工具" else "一句话 → 整个界面",
+                        if (chatMode == "agent") "多轮对话 · 可调用工具" else "一句话 → 界面 / 小程序 / 组件",
                         color = GenTheme.Dim, fontSize = 10.sp
                     )
                 }
@@ -893,7 +1074,11 @@ fun GenScaffold(
                     Box(Modifier.weight(1f).padding(vertical = 9.dp)) {
                         if (cmd.isEmpty()) {
                             Text(
-                                if (building) "正在写…（可点右侧停止）" else "给 ${soul.name} 一句话，它来写整个界面…",
+                                when {
+                                    building -> "正在写…（可点右侧停止）"
+                                    chatMode == "agent" -> "说点什么，它会调工具、查资料、记备忘…"
+                                    else -> "给 ${soul.name} 一句话：网页、原生组件、或完整小程序…"
+                                },
                                 color = GenTheme.Dim, fontSize = 14.sp
                             )
                         }
@@ -909,7 +1094,7 @@ fun GenScaffold(
                             modifier = Modifier.fillMaxWidth().heightIn(min = 22.dp, max = 132.dp)
                         )
                     }
-                    if (cmd.isNotBlank() && !building) {
+                    if (cmd.length >= 1500 && !building) {
                         Text(
                             "${cmd.length}",
                             color = GenTheme.Dim.copy(alpha = 0.6f), fontSize = 9.sp,
@@ -917,10 +1102,59 @@ fun GenScaffold(
                             modifier = Modifier.padding(bottom = 12.dp, end = 4.dp)
                         )
                     }
+                    // —— 功能收纳：Agent 模式把图片/文件/新建对话全收进「+」菜单，输入行只留 [+] 输入 [发送] ——
+                    if (chatMode == "agent" && !building) {
+                        Box {
+                            var moreMenu by remember { mutableStateOf(false) }
+                            IconButton(onClick = { moreMenu = true }, modifier = Modifier.size(40.dp)) {
+                                Icon(
+                                    Icons.Outlined.NoteAdd,
+                                    contentDescription = "更多功能",
+                                    tint = GenTheme.Dim,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                            DropdownMenu(expanded = moreMenu, onDismissRequest = { moreMenu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("发图片", color = GenTheme.Text, fontSize = 13.sp) },
+                                    leadingIcon = { Text("▨", color = GenTheme.AmberDim, fontSize = 12.sp) },
+                                    onClick = {
+                                        moreMenu = false
+                                        imagePicker.launch(
+                                            androidx.activity.result.PickVisualMediaRequest(
+                                                androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("发文件", color = GenTheme.Text, fontSize = 13.sp) },
+                                    leadingIcon = { Text("▤", color = GenTheme.AmberDim, fontSize = 12.sp) },
+                                    onClick = {
+                                        moreMenu = false
+                                        filePicker.launch(arrayOf("*/*"))
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("新建对话（当前会话归档保留）", color = GenTheme.Text, fontSize = 13.sp) },
+                                    leadingIcon = { Text("✚", color = GenTheme.AmberDim, fontSize = 12.sp) },
+                                    onClick = {
+                                        moreMenu = false
+                                        store.archiveChatLog()  // 历史进「话」菜单可回看，不再销毁
+                                        chatLog.clear()
+                                        store.clearChatLog()
+                                        chatSession.value?.reset()
+                                        pendingAttach.clear()
+                                        android.widget.Toast.makeText(ctx, "已开新对话，旧会话已归档（≡ → 话）", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                )
+                            }
+                        }
+                    }
                     if (building) {
                         IconButton(onClick = {
                             agentRef.value?.cancel()
                             renderer.value?.stop()
+                            com.genui.app.agent.AgentExecutionService.stop(ctx)
+                            chatLog.removeAll { it.id == "_pending_thinking" }
                             building = false
                             phase = Phase.Idle
                             phaseDetail = "已停止，画布保留已写入部分"
@@ -929,14 +1163,22 @@ fun GenScaffold(
                                 partialHtml = html.takeIf { it.length > 400 }
                             }
                         }) {
-                            Box(Modifier.size(14.dp).background(GenTheme.Red, RoundedCornerShape(3.dp)))
+                            Box(
+                                Modifier.size(16.dp)
+                                    .background(GenTheme.Red.copy(alpha = 0.92f), RoundedCornerShape(4.dp))
+                                    .border(0.5.dp, GenTheme.Red, RoundedCornerShape(4.dp))
+                            )
                         }
                     } else {
                         IconButton(
                             onClick = {
                                 if (cmd.isNotBlank()) {
                                     val p = cmd; cmd = ""
-                                    scope.launch { if (chatMode == "agent") chat(p) else generate(p) }
+                                    scope.launch {
+                                    val atts = pendingAttach.toList()
+                                    pendingAttach.clear()
+                                    if (chatMode == "agent") chat(p, atts) else generate(p)
+                                }
                                 }
                             },
                             enabled = cmd.isNotBlank()
@@ -964,6 +1206,7 @@ fun GenScaffold(
                     WebView(c).also { wv ->
                         setupWebView(wv)
                         webRef.value = wv
+                        com.genui.app.agent.CanvasHub.web = wv   // agent 自检工具（page_*）用
                         renderer.value = A2UIRenderer(
                             c, wv,
                             onFirstPaint = {},
@@ -1098,6 +1341,26 @@ fun GenScaffold(
                 }
             }
 
+            // —— 画布预览态的返回入口：此前 canvasPeek=true 后全应用无任何路径设回，
+            //    用户点"画布 ↗"即被锁死在画布（2026-09-17 截图 BUG） ——
+            if (chatMode == "agent" && canvasPeek) {
+                androidx.activity.compose.BackHandler(enabled = true) { canvasPeek = false }
+                Row(
+                    Modifier.align(Alignment.TopCenter)
+                        .padding(top = 64.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(GenTheme.Panel.copy(alpha = 0.96f))
+                        .border(0.5.dp, GenTheme.Line, RoundedCornerShape(20.dp))
+                        .clickable { canvasPeek = false }
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("←", color = GenTheme.Amber, fontSize = 14.sp, fontFamily = FontFamily.Monospace)
+                    Spacer(Modifier.width(7.dp))
+                    Text("返回对话", color = GenTheme.Text, fontSize = 13.sp)
+                }
+            }
+
             // —— Agent 标准对话面板：在 Agent 模式下覆盖在画布上方（画布 WebView 不销毁，保持两种模式绑定） ——
             if (chatMode == "agent" && !canvasPeek) {
                 ChatPanel(
@@ -1107,6 +1370,21 @@ fun GenScaffold(
                         renderer.value?.replay(html)
                         canvasPeek = true
                     },
+                    onOpenPerms = {
+                        showQuickNav = false
+                        onNavigate(NavTarget.Perms)
+                    },
+                    onRetry = {
+                        // 重试 = 用最后一条用户消息重新走一轮（错误后不必重新打字）
+                        val lastUser = chatLog.lastOrNull { it.role == "user" && it.done }?.text
+                        if (!lastUser.isNullOrBlank() && !building) {
+                            scope.launch { chat(lastUser) }
+                        }
+                    },
+                    aiAvatarPath = runCatching {
+                        java.io.File(ctx.filesDir, "soul_avatar.jpg").takeIf { it.exists() }?.absolutePath
+                    }.getOrNull(),
+                    aiName = soul.name,
                     onCardAction = { action ->
                         // 对话卡按钮 → 回灌 Agent 会话继续处理（此前是 no-op 死按钮）
                         scope.launch { chat("（用户点击了卡片按钮：「$action」，请基于当前上下文继续处理）") }
@@ -1145,6 +1423,46 @@ fun GenScaffold(
                         nativePopup = null
                     },
                 )
+            }
+        }
+    }
+
+    // —— 小程序画布内嵌场景（自研引擎实时渲染，v0.26.8：交付后画布直接可交互） ——
+    miniAppSurface?.let { appId ->
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { miniAppSurface = null },
+            properties = androidx.compose.ui.window.DialogProperties(
+                usePlatformDefaultWidth = false, dismissOnClickOutside = false)
+        ) {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF141210))
+                    .systemBarsPadding()
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("▦ $appId", color = GenTheme.Amber, fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace)
+                    Spacer(Modifier.weight(1f))
+                    Text("关闭", color = GenTheme.Dim, fontSize = 13.sp,
+                        modifier = Modifier.clickable { miniAppSurface = null }.padding(6.dp))
+                }
+                Box(Modifier.weight(1f)) {
+                    androidx.compose.ui.viewinterop.AndroidView(
+                        factory = { c ->
+                            com.yuanbao.miniapp.core.MiniAppEngine.createResolved(c, appId)
+                                ?: android.widget.TextView(c).apply {
+                                    text = "小程序 $appId 不存在"
+                                    setTextColor(0xFFD9A05B.toInt()); textSize = 13f
+                                    gravity = android.view.Gravity.CENTER
+                                }
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
         }
     }
@@ -1227,13 +1545,14 @@ fun GenScaffold(
                         Spacer(Modifier.height(10.dp))
                         Text(
                             "不是聊天回复 —— 是一屏真实可点击、可填写的界面\n" +
-                                "网页 / 原生 XML 布局 / Compose 组件 / 代码演示，你说用哪种就用哪种",
+                                "网页 / 原生 XML 布局 / Compose 组件 / 小程序 / 代码演示，你说用哪种就用哪种",
                             color = GenTheme.Dim, fontSize = 11.sp, textAlign = TextAlign.Center,
                             lineHeight = 17.sp
                         )
                         Spacer(Modifier.height(24.dp))
                         listOf(
                             "帮我做个记账本，能记每天花销",
+                            "用小程序做个番茄钟，25 分钟专注一轮",
                             "用原生控件做个设置页，要有开关和滑杆",
                             "今天有什么值得关注的新闻？",
                             "用 Compose 做一个专注计时器，25分钟一轮"
@@ -1256,9 +1575,190 @@ fun GenScaffold(
     }
 
     // —— 抖音式历史浏览：全屏上下滑动翻看已生成界面 ——
+    // —— 执行日志：按天 Markdown，轻量渲染（标题/列表/加粗/代码） ——
+    if (showLogs) {
+        val days = remember { com.genui.app.agent.AgentLog.listDays(ctx) }
+        var day by remember { mutableStateOf(days.firstOrNull()?.first ?: "") }
+        val md = remember(day) { com.genui.app.agent.AgentLog.readDay(ctx, day) }
+        androidx.compose.material3.ModalBottomSheet(
+            onDismissRequest = { showLogs = false },
+            containerColor = GenTheme.Panel,
+            tonalElevation = 0.dp
+        ) {
+            Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("✎ 执行日志", color = GenTheme.Text, fontSize = 15.sp)
+                    Spacer(Modifier.width(10.dp))
+                    Text("agent_logs/*.md", color = GenTheme.Dim, fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace)
+                }
+                Spacer(Modifier.height(8.dp))
+                // 天切换 chips
+                Row(Modifier.horizontalScroll(rememberScrollState())) {
+                    days.forEach { (d, size) ->
+                        val active = d == day
+                        Text(
+                            d.substring(5) + "(${size / 1024}KB)",
+                            color = if (active) GenTheme.Screen else GenTheme.Amber,
+                            fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                            modifier = Modifier
+                                .background(
+                                    if (active) GenTheme.Amber else GenTheme.Panel,
+                                    RoundedCornerShape(8.dp))
+                                .clickable { day = d }
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Column(
+                    Modifier.verticalScroll(rememberScrollState()).heightIn(max = 460.dp)
+                ) {
+                    md.lines().forEach { line ->
+                        val ln = line.trimEnd()
+                        when {
+                            ln.startsWith("# ") -> Text(ln.removePrefix("# "),
+                                color = GenTheme.Text, fontSize = 15.sp,
+                                modifier = Modifier.padding(top = 6.dp, bottom = 4.dp))
+                            ln.startsWith("## ") -> Text(ln.removePrefix("## "),
+                                color = GenTheme.Amber, fontSize = 12.sp,
+                                modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                            ln.startsWith("- ") -> Row {
+                                Text("· ", color = GenTheme.AmberDim, fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace)
+                                Text(ln.removePrefix("- "),
+                                    color = GenTheme.Text.copy(alpha = 0.9f), fontSize = 11.sp,
+                                    lineHeight = 16.sp)
+                            }
+                            else -> Text(ln, color = GenTheme.Dim, fontSize = 10.sp,
+                                lineHeight = 15.sp)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // —— 小程序列表：内置示例 + AI 生成，点按全屏打开 ——
+    if (showMiniApps) {
+        val apps = remember { com.yuanbao.miniapp.core.MiniAppEngine.listAppIds(ctx) }
+        androidx.compose.material3.ModalBottomSheet(
+            onDismissRequest = { showMiniApps = false },
+            containerColor = GenTheme.Panel,
+            tonalElevation = 0.dp
+        ) {
+            Column(Modifier.padding(horizontal = 18.dp, vertical = 6.dp)) {
+                Text("小程序", color = GenTheme.Text, fontSize = 16.sp)
+                Spacer(Modifier.height(2.dp))
+                Text("对 AI 说「做个小工具」即可生成新程序", color = GenTheme.Dim, fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace)
+                Spacer(Modifier.height(8.dp))
+                if (apps.isEmpty()) {
+                    Box(Modifier.fillMaxWidth().height(100.dp), contentAlignment = Alignment.Center) {
+                        Text("还没有小程序", color = GenTheme.Dim, fontSize = 12.sp)
+                    }
+                } else {
+                    Column {
+                        apps.forEach { id ->
+                            Row(
+                                Modifier.fillMaxWidth()
+                                    .clickable {
+                                        showMiniApps = false
+                                        ctx.startActivity(
+                                            android.content.Intent(ctx, com.genui.app.miniapp.GenUiMiniAppActivity::class.java)
+                                                .putExtra("appId", id))
+                                    }
+                                    .padding(vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("▦", color = GenTheme.Amber, fontSize = 15.sp, fontFamily = FontFamily.Monospace)
+                                Spacer(Modifier.width(12.dp))
+                                Text(id, color = GenTheme.Text, fontSize = 13.sp)
+                            }
+                            HorizontalDivider(color = GenTheme.Line, thickness = 0.5.dp)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(18.dp))
+            }
+        }
+    }
+
+    // —— 历史对话列表：归档会话回看 / 切换 / 删除 ——
+    if (showChatHistory) {
+        var archives by remember { mutableStateOf(store.listChatArchives()) }
+        androidx.compose.material3.ModalBottomSheet(
+            onDismissRequest = { showChatHistory = false },
+            containerColor = GenTheme.Panel,
+            tonalElevation = 0.dp
+        ) {
+            Column(Modifier.padding(horizontal = 18.dp, vertical = 6.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("历史对话", color = GenTheme.Text, fontSize = 16.sp)
+                    Spacer(Modifier.width(8.dp))
+                    Text("${archives.size} 个会话", color = GenTheme.Dim, fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace)
+                    Spacer(Modifier.weight(1f))
+                    Text("点按切换 · 长按删除", color = GenTheme.Dim, fontSize = 10.sp)
+                }
+                Spacer(Modifier.height(8.dp))
+                if (archives.isEmpty()) {
+                    Box(Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
+                        Text("还没有归档对话\n点输入行的「+」→ 新建对话，当前会话会归档到这里",
+                            color = GenTheme.Dim, fontSize = 12.sp, lineHeight = 18.sp)
+                    }
+                } else {
+                    androidx.compose.foundation.lazy.LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                        items(archives.size) { i ->
+                            val a = archives[i]
+                            val df = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.CHINA)
+                            @OptIn(ExperimentalFoundationApi::class)
+                            Row(
+                                Modifier.fillMaxWidth()
+                                    .combinedClickable(
+                                        onClick = {
+                                            val entries = store.restoreChatArchive(a.file)
+                                            chatLog.clear()
+                                            entries.forEach { e ->
+                                                chatLog.add(ChatMsg(e.id, e.role, e.text, e.done, e.ts))
+                                            }
+                                            chatSession.value?.restoreHistory(entries.map { it.role to it.text })
+                                            showChatHistory = false
+                                            android.widget.Toast.makeText(ctx, "已切回：${a.title}", android.widget.Toast.LENGTH_SHORT).show()
+                                        },
+                                        onLongClick = {
+                                            store.deleteChatArchive(a.file)
+                                            archives = store.listChatArchives()  // 刷新列表
+                                            android.widget.Toast.makeText(ctx, "已删除", android.widget.Toast.LENGTH_SHORT).show()
+                                        }
+                                    )
+                                    .padding(vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("❉", color = GenTheme.AmberDim, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+                                Spacer(Modifier.width(10.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(a.title.ifBlank { "对话" }, color = GenTheme.Text, fontSize = 13.sp, maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                                    Spacer(Modifier.height(2.dp))
+                                    Text("${a.count} 条 · ${if (a.ts > 0) df.format(java.util.Date(a.ts)) else ""}",
+                                        color = GenTheme.Dim, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                                }
+                            }
+                            if (i < archives.lastIndex) HorizontalDivider(color = GenTheme.Line, thickness = 0.5.dp)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(18.dp))
+            }
+        }
+    }
+
     if (browsing) {
         HistoryBrowser(
             pages = store.loadPages(),
+            miniApps = store.loadMiniAppPages(),
             onExit = { browsing = false }
         )
     }
@@ -1286,6 +1786,7 @@ fun GenScaffold(
         },
         onClear = {
             store.clearPages()
+            store.clearMiniAppPages()
             stackCount = 0
             canvasStack.clear()
         }
@@ -1438,6 +1939,15 @@ private fun setupWebView(wv: WebView) {
 private fun installBackendEngines(wv: WebView) {
     val ctx = wv.context
     wv.webChromeClient = object : android.webkit.WebChromeClient() {
+        // JS 错误回传给 AI 自检（console.error 与未捕获异常都走这里）
+        override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
+            val m = consoleMessage ?: return super.onConsoleMessage(consoleMessage)
+            if (m.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.ERROR) {
+                com.genui.app.agent.CanvasHub.recordError(
+                    "${m.message()} @${m.sourceId()?.substringAfterLast('/') ?: "?"}:${m.lineNumber()}")
+            }
+            return super.onConsoleMessage(consoleMessage)
+        }
         override fun onPermissionRequest(request: android.webkit.PermissionRequest?) {
             request?.let { req ->
                 val grant = (req.resources ?: return).filter { r ->
@@ -1597,13 +2107,16 @@ private fun OnboardButton(label: String, onClick: () -> Unit) {
 @Composable
 private fun HistoryBrowser(
     pages: List<GeneratedPage>,
+    miniApps: List<String> = emptyList(),
     onExit: () -> Unit
 ) {
-    var pos by remember { mutableStateOf(maxOf(0, pages.lastIndex)) }
+    // 小程序画面排在 HTML 画面之后：总页数 = HTML + 小程序
+    val total = pages.size + miniApps.size
+    var pos by remember { mutableStateOf(maxOf(0, total - 1)) }
     val histWv = remember { java.util.concurrent.atomic.AtomicReference<WebView?>(null) }
     val context = androidx.compose.ui.platform.LocalContext.current
     Box(Modifier.fillMaxSize().background(GenTheme.Screen)) {
-        if (pages.isEmpty()) {
+        if (total == 0) {
             Column(
                 Modifier.fillMaxSize(), Arrangement.Center, Alignment.CenterHorizontally
             ) {
@@ -1616,21 +2129,40 @@ private fun HistoryBrowser(
             }
             return
         }
-        val page = pages[pos]
-        // 用 key(pos) 重建 WebView，确保每屏都重新加载对应 HTML。
-        // 必须按 genui.local 加载 + 挂 asset loader（见 setupHistoryWebView），
-        // 否则 AI 页面依赖的运行时/字体解析不到，历史页会空白。
-        key(pos) {
-            AndroidView(
-                factory = { c ->
-                    WebView(c).also { wv ->
-                        setupHistoryWebView(wv)
-                        histWv.set(wv)
-                        wv.loadDataWithBaseURL("https://genui.local/", page.html, "text/html", "UTF-8", null)
-                    }
-                },
-                modifier = Modifier.fillMaxSize()
-            )
+        val isMiniApp = pos >= pages.size
+        val miniAppId = if (isMiniApp) miniApps[pos - pages.size] else ""
+        if (isMiniApp) {
+            // —— 小程序画面：原生 MiniAppView 直接嵌入画布（自研引擎渲染，非 WebView） ——
+            key(pos) {
+                AndroidView(
+                    factory = { c ->
+                        com.yuanbao.miniapp.core.MiniAppEngine.createResolved(c, miniAppId)
+                            ?: android.widget.TextView(c).apply {
+                                text = "小程序 $miniAppId 不存在"
+                                setTextColor(0xFFD9A05B.toInt()); textSize = 14f
+                                gravity = android.view.Gravity.CENTER
+                            }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        } else {
+            val page = pages[pos]
+            // 用 key(pos) 重建 WebView，确保每屏都重新加载对应 HTML。
+            // 必须按 genui.local 加载 + 挂 asset loader（见 setupHistoryWebView），
+            // 否则 AI 页面依赖的运行时/字体解析不到，历史页会空白。
+            key(pos) {
+                AndroidView(
+                    factory = { c ->
+                        WebView(c).also { wv ->
+                            setupHistoryWebView(wv)
+                            histWv.set(wv)
+                            wv.loadDataWithBaseURL("https://genui.local/", page.html, "text/html", "UTF-8", null)
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
         }
         // （已移除全屏手势层：它盖在 WebView 上吃掉一切点击——历史页也要能交互）
         // 顶部信息条
@@ -1650,16 +2182,17 @@ private fun HistoryBrowser(
                 modifier = Modifier.clickable { if (pos > 0) pos-- }.padding(horizontal = 8.dp)
             )
             Text(
-                "${pos + 1} / ${pages.size}",
+                "${pos + 1} / $total",
                 color = GenTheme.Amber, fontSize = 11.sp, fontFamily = FontFamily.Monospace
             )
             Text(
                 "›", color = GenTheme.Amber, fontSize = 17.sp,
-                modifier = Modifier.clickable { if (pos < pages.lastIndex) pos++ }.padding(horizontal = 8.dp)
+                modifier = Modifier.clickable { if (pos < total - 1) pos++ }.padding(horizontal = 8.dp)
             )
             Spacer(Modifier.width(8.dp))
             Text(
-                page.title, color = GenTheme.Dim, fontSize = 11.sp, maxLines = 1,
+                if (isMiniApp) "▦ 小程序 · $miniAppId" else pages[pos].title,
+                color = GenTheme.Dim, fontSize = 11.sp, maxLines = 1,
                 modifier = Modifier.weight(1f)
             )
             Text(

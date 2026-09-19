@@ -289,3 +289,66 @@ object PluginRuntime {
         return s
     }
 }
+
+
+/**
+ * Python 运行时 —— Chaquopy 内嵌 CPython 3.12（真实解释器，非模拟）。
+ * 所有代码在单一后台线程串行执行（Chaquopy 自动 attach 线程）；
+ * print/stderr 经 genuipy.exec_python 实时捕获；支持协作式取消。
+ */
+object PyRuntime {
+
+    private val executor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "genui-py").apply { isDaemon = true }
+    }
+
+    @Volatile
+    private var started = false
+
+    private fun ensureStarted(ctx: Context) {
+        if (started) return
+        synchronized(this) {
+            if (started) return
+            com.chaquo.python.Python.start(com.chaquo.python.android.AndroidPlatform(ctx.applicationContext))
+            started = true
+        }
+    }
+
+    private fun module() = com.chaquo.python.Python.getInstance().getModule("genuipy")
+
+    /** 执行 Python 脚本：返回 {ok, output, summary} */
+    fun run(ctx: Context, code: String, timeoutMs: Long = 60_000L): JSONObject {
+        if (code.isBlank()) return JSONObject().put("ok", false).put("error", "代码为空")
+        val latch = CountDownLatch(1)
+        val result = AtomicReference<JSONObject?>(
+            JSONObject().put("ok", false).put("error", "执行未完成"))
+        executor.execute {
+            try {
+                ensureStarted(ctx)
+                val py = module()
+                val logs = StringBuilder()
+                val push = com.chaquo.python.PyObject.fromJava { stream: String, text: String ->
+                    synchronized(logs) { logs.append(text) }
+                    Unit
+                }
+                val summary = py.callAttr("exec_python", code, push).toString()
+                val out = synchronized(logs) { logs.toString() }
+                result.set(JSONObject()
+                    .put("ok", !summary.startsWith("异常") && !summary.startsWith("语法错误"))
+                    .put("output", out.ifBlank { "（无输出）" })
+                    .put("summary", summary))
+            } catch (e: Throwable) {
+                result.set(JSONObject().put("ok", false)
+                    .put("output", "")
+                    .put("error", "Python 异常：" + (e.message ?: e.toString()).take(500)))
+            } finally {
+                latch.countDown()
+            }
+        }
+        if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+            return JSONObject().put("ok", false)
+                .put("error", "Python 执行超时（${timeoutMs / 1000}s）。长任务请用协作取消或拆分脚本。")
+        }
+        return result.get() ?: JSONObject().put("ok", false).put("error", "未知状态")
+    }
+}

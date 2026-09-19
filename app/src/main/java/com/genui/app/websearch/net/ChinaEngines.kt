@@ -28,38 +28,6 @@ object ChinaText {
     }
 }
 
-/** 百度：国内可达性最好，mu= 参数里藏真实地址 */
-class BaiduEngine(override val enabled: Boolean = true) : SearchEngine {
-    override val id = "baidu"
-
-    private val RESULT_RE = Regex(
-        """(?s)<div class="(?:result|c-container)[^"]*"[^>]*>.*?(?=<div class="(?:result|c-container)[^"]*"|<div class="page"|</body>)"""
-    )
-    private val MU_RE = Regex("""\bmu="(https?://[^"]+)"""")
-    private val HREF_RE = Regex("""<a[^>]*href="(https?://[^"]+)"""")
-    private val TITLE_RE = Regex("""(?s)<h3[^>]*>.*?<a[^>]*>(.*?)</a>""")
-    private val SNIP_RE = Regex("""(?s)<div class="(?:c-abstract|content-right[^"]*|c-row c-span[0-9]+)[^>]*>(.*?)</div>""")
-
-    override suspend fun search(query: String, limit: Int): List<SearchHit> {
-        val q = URLEncoder.encode(query, "UTF-8")
-        val url = "https://www.baidu.com/s?wd=$q&rn=${limit.coerceIn(5, 10)}"
-        val html = HttpStack.request(url, timeoutMs = 9_000).takeIf { it.ok }?.body
-            ?: return emptyList()
-        val out = ArrayList<SearchHit>()
-        for ((i, blk) in RESULT_RE.findAll(html).withIndex()) {
-            if (out.size >= limit) break
-            val v = blk.value
-            val url = MU_RE.find(v)?.groupValues?.get(1)
-                ?: HREF_RE.find(v)?.groupValues?.get(1)?.takeIf { it.startsWith("http") }
-                ?: continue
-            val title = ChinaText.clean(TITLE_RE.find(v)?.groupValues?.get(1) ?: continue)
-            if (title.isBlank()) continue
-            val snippet = ChinaText.clean(SNIP_RE.find(v)?.groupValues?.get(1) ?: "").take(240)
-            out.add(SearchHit(title, url, snippet, id, position = out.size + 1))
-        }
-        return out
-    }
-}
 
 /** 搜狗：纯中文场景补充 */
 class SogouEngine(override val enabled: Boolean = true) : SearchEngine {

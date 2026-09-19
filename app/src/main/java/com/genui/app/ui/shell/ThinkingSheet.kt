@@ -207,9 +207,10 @@ private fun kindStyle(e: ThinkingTimeline.Entry): Pair<Color, Glyph> = when (e.k
     ThinkingTimeline.Kind.PLAN -> Color(0xFFD89A4A) to Glyph.SPARK
     ThinkingTimeline.Kind.THINK -> GenTheme.AmberDim to Glyph.BRAIN
     ThinkingTimeline.Kind.DECIDE -> GenTheme.Amber to Glyph.FORK
-    ThinkingTimeline.Kind.TOOL -> Color(0xFF5FA8A0) to Glyph.WRENCH
+    ThinkingTimeline.Kind.TOOL ->
+        (if (e.text.contains("失败")) GenTheme.Red else Color(0xFF5FA8A0)) to Glyph.WRENCH
     ThinkingTimeline.Kind.AUTH -> Color(0xFF5FA8A0) to Glyph.KEY
-    ThinkingTimeline.Kind.DENIED -> GenTheme.Red to Glyph.BLOCK
+    ThinkingTimeline.Kind.DENIED -> GenTheme.Amber to Glyph.BLOCK
     ThinkingTimeline.Kind.RESULT ->
         (if (e.text.startsWith("失败")) GenTheme.Red else GenTheme.Green) to Glyph.CHECK
     ThinkingTimeline.Kind.RENDER -> Color(0xFF8A7BC8) to Glyph.PEN

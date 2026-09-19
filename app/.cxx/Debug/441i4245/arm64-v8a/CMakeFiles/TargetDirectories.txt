@@ -1,0 +1,3 @@
+/home/z/my-project/genui-upstream/app/.cxx/Debug/441i4245/arm64-v8a/CMakeFiles/quropybridge.dir
+/home/z/my-project/genui-upstream/app/.cxx/Debug/441i4245/arm64-v8a/CMakeFiles/edit_cache.dir
+/home/z/my-project/genui-upstream/app/.cxx/Debug/441i4245/arm64-v8a/CMakeFiles/rebuild_cache.dir

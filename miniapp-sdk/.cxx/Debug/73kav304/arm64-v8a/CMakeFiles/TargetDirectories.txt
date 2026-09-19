@@ -1,0 +1,4 @@
+/home/z/my-project/genui-upstream/miniapp-sdk/.cxx/Debug/73kav304/arm64-v8a/CMakeFiles/miniapp_engine.dir
+/home/z/my-project/genui-upstream/miniapp-sdk/.cxx/Debug/73kav304/arm64-v8a/CMakeFiles/miniappjs.dir
+/home/z/my-project/genui-upstream/miniapp-sdk/.cxx/Debug/73kav304/arm64-v8a/CMakeFiles/edit_cache.dir
+/home/z/my-project/genui-upstream/miniapp-sdk/.cxx/Debug/73kav304/arm64-v8a/CMakeFiles/rebuild_cache.dir

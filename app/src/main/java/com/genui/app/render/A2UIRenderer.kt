@@ -34,6 +34,88 @@ import com.genui.app.bridge.MoBridgeHost
  *    吞点击（kotlinlang 2024-11 AndroidView 行为变更）也能被这层兜住。
  * 幂等：__genuiTap 哨兵。计数进 __genuiTouch，供 🩺 触诊探针读取。
  */
+val TEMPLATE_ENGINE_JS = """
+function __genuiEval(expr, scope) {
+  try {
+    var keys = [], vals = [];
+    if (scope) { for (var k in scope) { keys.push(k); vals.push(scope[k]); } }
+    keys.push('window');
+    var f = Function(keys.join(','), 'return (' + expr + ');');
+    var r = f.apply(null, vals.concat([window]));
+    return (r === undefined || r === null) ? '' : String(r);
+  } catch (e) { return null; }
+}
+function __genuiTemplate(root) {
+  if (!root) return;
+  var host;
+  while ((host = root.querySelector('[wx\\:for],[data-wxfor]')) !== null) {
+    var expr = host.getAttribute('wx:for') || host.getAttribute('data-wxfor') || '';
+    var itemName = host.getAttribute('wx:for-item') || 'item';
+    var idxName = host.getAttribute('wx:for-index') || 'index';
+    var parent = host.parentNode;
+    if (!parent) break;
+    var arr = null;
+    try { var clean = expr.replace(/^\{\{|\}\}$/g, ''); arr = (new Function('return (' + clean + ');'))(); } catch (e) {}
+    if (!arr || !arr.length) { host.style.display = 'none'; continue; }
+    var frag = document.createDocumentFragment();
+    var n = Math.min(arr.length, 200);
+    for (var i = 0; i < n; i++) {
+      var clone = host.cloneNode(true);
+      clone.removeAttribute('wx:for'); clone.removeAttribute('wx:for-item'); clone.removeAttribute('wx:for-index');
+      clone.removeAttribute('data-wxfor');
+      var scope = {}; scope[itemName] = arr[i]; scope[idxName] = i;
+      clone.__genuiScope = scope;
+      __genuiTemplate(clone);
+      frag.appendChild(clone);
+    }
+    parent.replaceChild(frag, host);
+  }
+  root.querySelectorAll('[wx\\:if],[data-wxif]').forEach(function(el) {
+    var expr = el.getAttribute('wx:if') || el.getAttribute('data-wxif') || 'false';
+    var v = __genuiEval(expr.replace(/^\{\{|\}\}$/g, ''), el.__genuiScope);
+    if (v === null || v === 'false' || v === '') el.style.display = 'none';
+  });
+  var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+  var nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  nodes.forEach(function(tn) {
+    var s = tn.nodeValue;
+    if (s.indexOf('{{') === -1) return;
+    var scope = null; var p = tn.parentElement;
+    while (p) { if (p.__genuiScope) { scope = p.__genuiScope; break; } p = p.parentElement; }
+    var out = s.replace(/\{\{([^}]{1,120})\}\}/g, function(_, expr) {
+      var v = __genuiEval(expr.trim(), scope);
+      return v === null ? '' : v;
+    });
+    if (out !== s) tn.nodeValue = out;
+  });
+  root.querySelectorAll('*').forEach(function(el) {
+    for (var i = 0; i < el.attributes.length; i++) {
+      var attr = el.attributes[i];
+      if (attr.value.indexOf('{{') === -1) continue;
+      var nv = attr.value.replace(/\{\{([^}]{1,120})\}\}/g, function(_, expr) {
+        var v = __genuiEval(expr.trim(), el.__genuiScope);
+        return v === null ? '' : v;
+      });
+      el.setAttribute(attr.name, nv);
+    }
+  });
+  // 5) 竖胶囊修正：AI 滥用 flex:1 时，chips/搜索框被拉成两屏高的竖条——
+  // 高度超过 2 倍视口但内容只有少量文本的元素，强制恢复 auto 高度
+  try {
+    var vh = window.innerHeight || 800;
+    root.querySelectorAll('*').forEach(function(el) {
+      var r = el.getBoundingClientRect();
+      if (r.height > vh * 2 && el.innerText && el.innerText.trim().length < 200 && r.width < window.innerWidth) {
+        el.style.height = 'auto';
+        el.style.minHeight = '0';
+        el.style.maxHeight = 'none';
+      }
+    });
+  } catch (e) {}
+}
+"""
+
 val TAP_NORMALIZER_JS = """
 (function(){
 if(window.__genuiTap)return;window.__genuiTap=1;
@@ -376,6 +458,8 @@ window.__genFlushMounts = function(){ flush(); __replay(); };
             pendingChunks.clear()
             this@A2UIRenderer.seedHtml = seedHtml
             webView.stopLoading()
+            webView.settings.useWideViewPort = true
+            webView.settings.loadWithOverviewMode = true   // 内容超宽时整体缩放适配，不留裁切
             webView.webViewClient = object : android.webkit.WebViewClient() {
                 private var opened = false
 
@@ -410,6 +494,9 @@ window.__genFlushMounts = function(){ flush(); __replay(); };
                         "document.write(" + jsString(MoBridgeHost.JS_WRAPPER) + ");" +
                         // 离线字体先注册，AI 的 CSS 才能直接用 'Inter' / 'JetBrains Mono' / 'Space Grotesk'
                         "document.write(" + jsString(RuntimeRegistry.fontFaceCss()) + ");" +
+                        // 移动端视口兜底：AI 忘写 viewport meta 时强制按设备宽布局，防桌面尺寸溢出
+                        "document.write(" + jsString(
+                            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no\">") + ");" +
                         // Vue 延迟挂载 + CDN 失败回落本地运行时 + JS 错误捕获
                         // 必须写在 MoBridge 之后、AI 任何脚本之前
                         "document.write(" + jsString(genShim) + ");" +
@@ -455,6 +542,14 @@ window.__genFlushMounts = function(){ flush(); __replay(); };
     fun end() {
         main.post {
             if (!pageReady) { writing = false; return@post }
+            // ★ 模板语法就地求值：AI（尤其快模型）常把 {{ 插值 }} / wx:for / wx:if 写进 HTML——
+            // 浏览器不认识，页面满是裸括号。与其依赖重画（快模型免疫提示），不如端上兜底：
+            // 能求值就求值（页面 script 定义的数据/函数直接生效），wx:for 按数组克隆节点，
+            // 求值不了的残留文本清空——用户永远看到干净页面。
+            evalJs(TEMPLATE_ENGINE_JS + ";try{__genuiTemplate(document.body);}catch(e){}")
+            evalJs(
+                "setTimeout(function(){try{__genuiTemplate(document.body);}catch(e){}},400);" +
+                "setTimeout(function(){try{__genuiTemplate(document.body);}catch(e){}},1200);")
             // 容错闭合：模型偶尔漏掉 </html> / </body>，浏览器对 document.close() 已能自愈，
             // 但显式补齐可保证「回放」时 HTML 结构完整可独立打开
             evalJs("document.close();")

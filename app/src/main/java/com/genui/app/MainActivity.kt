@@ -103,6 +103,7 @@ class MainActivity : ComponentActivity() {
                                 NavTarget.Perms      -> PermissionScreen(store = store, onBack = { screen = NavTarget.Settings })
                                 NavTarget.ModelConfig -> ModelConfigScreen(store = store, onBack = { screen = NavTarget.Settings })
                                 NavTarget.Mcp -> McpConfigScreen(context = store.context(), onBack = { screen = NavTarget.Settings })
+                                NavTarget.CapabilityModels -> com.genui.app.ui.settings.CapabilityModelsScreen(store = store, onBack = { screen = NavTarget.Settings })
                                 NavTarget.Settings   -> SettingsScreen(
                                     store = store,
                                     onBack = close,
@@ -113,6 +114,7 @@ class MainActivity : ComponentActivity() {
                                             SettingsItem.Perms -> NavTarget.Perms
                                             SettingsItem.ModelConfig -> NavTarget.ModelConfig
                                             SettingsItem.Mcp -> NavTarget.Mcp
+                                            SettingsItem.CapabilityModels -> NavTarget.CapabilityModels
                                         }
                                     }
                                 )

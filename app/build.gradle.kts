@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.chaquo.python")   // 内嵌 CPython 3.12（真实 Python 执行）
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
@@ -11,10 +12,12 @@ android {
 
     defaultConfig {
         applicationId = "com.genui.app"
+        ndk { abiFilters += listOf("arm64-v8a") }
+    ndkVersion = "27.0.12077973"
         minSdk = 26
         targetSdk = 36
-        versionCode = 58
-        versionName = "0.17.0"
+        versionCode = 108
+        versionName = "0.26.8"
     }
 
     // 项目固定签名：signing/genui.keystore（口令直接写在本文件，debug 级可接受）。
@@ -50,16 +53,19 @@ android {
         // 启动自检用 BuildConfig.DEBUG 决定是否提示资源缺失
         buildConfig = true
     }
-    packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
-}
+    externalNativeBuild { cmake { path = file("src/main/jni/CMakeLists.txt"); version = "3.22.1" } }
 
-// 调试包不需要剥离 native 符号。沙箱环境无 NDK，Gradle 9.3 下 stripDebugDebugSymbols
-// 会因无法对 .so 计算 MD5 而直接失败；关闭该任务即可（仅保留未剥离的 .so，不影响功能）。
-tasks.configureEach {
-    if (name == "stripDebugDebugSymbols") {
-        enabled = false
+    packaging {
+        resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        jniLibs {
+            useLegacyPackaging = true
+            doNotStrip += "**/*.so"
+        }
     }
 }
+
+// native 符号剥离：NDK 27 已随构建链装好，stripDebugDebugSymbols 正常执行
+// （曾因沙箱无 NDK 被禁用——那会断供 packageDebug 的 lib 输入，APK 丢整个 lib/ 目录）
 
 kotlin {
     compilerOptions {
@@ -74,6 +80,7 @@ kotlin {
 }
 
 dependencies {
+    implementation(project(":miniapp-sdk"))
     val composeBom = platform("androidx.compose:compose-bom:2025.10.01")
     implementation(composeBom)
 
@@ -108,4 +115,11 @@ dependencies {
     implementation("com.caverock:androidsvg:1.4")
     // 图片加载（image op 的 url / 网络图）
     implementation("io.coil-kt:coil-compose:2.6.0")
+}
+
+// —— Chaquopy：内嵌 CPython（真实 Python 执行）——
+chaquopy {
+    defaultConfig {
+        version = "3.12"   // 3.12 wheel 生态最全；纯 stdlib 起步，运行时按需 pip
+    }
 }

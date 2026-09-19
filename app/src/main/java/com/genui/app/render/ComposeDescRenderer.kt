@@ -36,6 +36,20 @@ import org.json.JSONObject
  */
 object ComposeDescRenderer {
 
+    /** A2UI 官方引擎指引（画布 compose 通道：高级组件自动路由到谷歌官方渲染器） */
+    val A2UI_GUIDANCE: String = """
+写在 <script type="text/x-compose"> 的 JSON 组件树里，出现以下【官方引擎组件】时，
+整棵树自动路由到谷歌 A2UI 官方渲染器（13182 行官方实现，比基础组件更强）：
+  heading(variant:h1/h2/body…) / Image(url) / Checkbox / Select(options) / List /
+  Chart(图表：gauge/line/stock) / AudioPlayer / VideoPlayer / Tabs / DatetimeInput
+基础组件（Column/Row/Text/Button/Card…）与其混用均可，路由自动判定。
+数据绑定：{"path":"/weather/temp"} 配合 updateDataModel 语义；静态文本 {"literal":"..."}。
+示例：{"type":"Column","children":[
+  {"type":"heading","text":{"literal":"股票行情"},"variant":"h2"},
+  {"type":"Chart","chartType":"line","data":{"path":"/stocks"}}]}
+（谷歌官方 A2UIPromptGuidance 指引全文可参考 org/a2ui/compose/protocol/A2UIPromptGuidance.kt）
+""".trimIndent()
+
     /** 支持的组件与其属性说明（提示词由它派生） */
     val componentHelp: String = """
 Column / Row / Box  布局容器：children[] 子组件；属性 gap(间距dp) / padding /

@@ -2,6 +2,8 @@ package com.genui.app.ui.settings
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -29,6 +31,16 @@ import org.json.JSONObject
  */
 @Composable
 fun SoulScreen(store: GenStore, onBack: () -> Unit) {
+    val avatarFile = java.io.File(store.context().filesDir, "soul_avatar.jpg")
+    val avatarPicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) runCatching {
+            store.context().contentResolver.openInputStream(uri)?.use { ins ->
+                avatarFile.outputStream().use { ins.copyTo(it) }
+            }
+        }
+    }
     val scope = rememberCoroutineScope()
     val soulStore = remember { SoulStore(store.context()) }
     var soul by remember { mutableStateOf(soulStore.load() ?: soulStore.fallback) }
@@ -88,6 +100,28 @@ fun SoulScreen(store: GenStore, onBack: () -> Unit) {
             Row(Modifier.fillMaxWidth().statusBarsPadding().background(GenTheme.Screen).padding(horizontal = 8.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onBack) { Text("← 返回", color = GenTheme.Amber, fontSize = 13.sp) }
                 Spacer(Modifier.weight(1f))
+                // AI 头像上传：显示在顶栏品牌章与对话消息旁
+                androidx.compose.material3.TextButton(onClick = {
+                    avatarPicker.launch(androidx.activity.result.PickVisualMediaRequest(
+                        androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
+                }) {
+                    val bmp = if (avatarFile.exists()) runCatching {
+                        val bo = android.graphics.BitmapFactory.Options()
+                        bo.inJustDecodeBounds = true
+                        android.graphics.BitmapFactory.decodeFile(avatarFile.absolutePath, bo)
+                        bo.inSampleSize = maxOf(1, bo.outWidth / 128)
+                        bo.inJustDecodeBounds = false
+                        android.graphics.BitmapFactory.decodeFile(avatarFile.absolutePath, bo)
+                    }.getOrNull() else null
+                    if (bmp != null) {
+                        androidx.compose.foundation.Image(
+                            bitmap = bmp.asImageBitmap(), contentDescription = "AI 头像",
+                            modifier = Modifier.size(28.dp).clip(androidx.compose.foundation.shape.CircleShape))
+                    } else {
+                        Text("上传头像", color = GenTheme.Dim, fontSize = 12.sp)
+                    }
+                }
+Spacer(Modifier.weight(1f))
                 Text("灵魂", color = GenTheme.Text, fontSize = 15.sp)
                 Spacer(Modifier.weight(1f))
                 Spacer(Modifier.width(72.dp))
@@ -144,6 +178,51 @@ fun SoulScreen(store: GenStore, onBack: () -> Unit) {
                 if (soul.greeting.isNotBlank()) {
                     Text("开场白", color = GenTheme.Dim, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
                     Text("「${soul.greeting}」", color = GenTheme.Amber, fontSize = 12.sp, fontFamily = FontFamily.Serif)
+                }
+            }
+
+            // —— 灵魂头像：上传后 Agent 对话框即时换头像（未配置时兜底显示 App 图标） ——
+            Spacer(Modifier.height(14.dp))
+            val ctx = androidx.compose.ui.platform.LocalContext.current
+            var avatarVer by remember { mutableStateOf(0) }
+            val avatarFile = remember(avatarVer) { java.io.File(ctx.filesDir, "soul_avatar.jpg") }
+            val avatarPicker = androidx.activity.compose.rememberLauncherForActivityResult(
+                androidx.activity.result.contract.ActivityResultContracts.GetContent()
+            ) { uri ->
+                if (uri != null) runCatching {
+                    val src = ctx.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+                    val bmp = android.graphics.BitmapFactory.decodeByteArray(src, 0, src.size)
+                    java.io.File(ctx.filesDir, "soul_avatar.jpg").outputStream().use { out ->
+                        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, out)
+                    }
+                    avatarVer++
+                }.onFailure { android.widget.Toast.makeText(ctx, "头像保存失败：${it.message}", android.widget.Toast.LENGTH_SHORT).show() }
+            }
+            CardShape {
+                Text("灵魂头像（Agent 对话框显示）", color = GenTheme.Dim, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (avatarFile.exists()) {
+                        val bmp = remember(avatarVer) {
+                            runCatching {
+                                val bo = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                                android.graphics.BitmapFactory.decodeFile(avatarFile.absolutePath, bo)
+                                bo.inSampleSize = maxOf(1, bo.outWidth / 128)
+                                android.graphics.BitmapFactory.decodeFile(avatarFile.absolutePath)
+                            }.getOrNull()
+                        }
+                        if (bmp != null) androidx.compose.foundation.Image(
+                            bitmap = bmp.asImageBitmap(), contentDescription = "灵魂头像",
+                            modifier = Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)))
+                    } else {
+                        Text("◎", color = GenTheme.Amber, fontSize = 22.sp, fontFamily = FontFamily.Serif,
+                            modifier = Modifier.size(44.dp).background(GenTheme.Amber.copy(alpha = 0.1f), RoundedCornerShape(10.dp)))
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    TextButton(onClick = { avatarPicker.launch("image/*") }) { Text("上传头像", color = GenTheme.Amber, fontSize = 12.sp) }
+                    if (avatarFile.exists()) TextButton(onClick = {
+                        avatarFile.delete(); avatarVer++
+                    }) { Text("恢复默认", color = GenTheme.Red, fontSize = 12.sp) }
                 }
             }
 

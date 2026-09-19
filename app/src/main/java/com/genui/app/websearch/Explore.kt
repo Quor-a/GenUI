@@ -34,6 +34,14 @@ object Explore {
      * 返回 {items:[{title,url,source,date,snippet}], sources:{...}}
      */
     suspend fun news(query: String, max: Int = 10): JSONObject = coroutineScope {
+        val bing = async {
+            runCatching {
+                val xml = withTimeoutOrNull(TIMEOUT_MS) {
+                    HttpStack.get("https://cn.bing.com/news/search?q=${enc(query)}&format=RSS&setmkt=zh-CN")
+                } ?: throw IllegalStateException("超时/无响应")
+                parseRss(xml, "bing-news", max)
+            }.getOrElse { Pair(emptyList(), err(it)) }
+        }
         val gnews = async {
             runCatching {
                 val xml = withTimeoutOrNull(TIMEOUT_MS) {
@@ -58,13 +66,28 @@ object Explore {
                 parseBaiduNews(html, max)
             }.getOrElse { Pair(emptyList(), err(it)) }
         }
+        val (biItems, biDiag) = bing.await()
         val (gItems, gDiag) = gnews.await()
         val (sItems, sDiag) = sogou.await()
         val (bItems, bDiag) = baidu.await()
+        val all = mergeDedupe(biItems + gItems + sItems + bItems, max)
+        if (all.length() == 0) {
+            // 四源全空：明确报错并带各源死因，绝不给模型"空结果自己编"的空间
+            return@coroutineScope JSONObject()
+                .put("error", "新闻搜索全部数据源失败（bing-news:$biDiag; google-news:$gDiag; " +
+                    "sogou-news:$sDiag; baidu-news:$bDiag）。" +
+                    "当前设备网络拿不到任何新闻数据 —— 必须在回复中如实告知用户搜索失败，" +
+                    "严禁虚构任何新闻标题或内容。")
+                .put("items", JSONArray())
+                .put("sources", JSONObject()
+                    .put("bing-news", biDiag).put("sogou-news", sDiag)
+                    .put("baidu-news", bDiag).put("google-news", gDiag))
+        }
         JSONObject()
-            .put("items", mergeDedupe(gItems + sItems + bItems, max))
+            .put("items", all)
             .put("sources", JSONObject()
-                .put("sogou-news", sDiag).put("baidu-news", bDiag).put("google-news", gDiag))
+                .put("bing-news", biDiag).put("sogou-news", sDiag)
+                .put("baidu-news", bDiag).put("google-news", gDiag))
     }
 
     /** 搜狗新闻 HTML：结果块 <h3 class="vr-tit"><a href>标题</a></h3> + 摘要 div（fz-mid/space-txt/text-layout） */

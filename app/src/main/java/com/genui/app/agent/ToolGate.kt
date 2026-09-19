@@ -114,6 +114,10 @@ class ToolGate(context: Context) {
      * @param ask UI 层注入的实时询问（suspend，等待用户选择）
      */
     suspend fun authorize(tool: String, argsBrief: String, ask: suspend (tool: String, brief: String, level: Int) -> Boolean): String? {
+        if (tool == "none") {   // 免授权门类（小程序工具：只写 miniapps 目录）
+            audit("miniapps", "ok(auto)", argsBrief)
+            return null
+        }
         val mode = modeOf(tool)
         return when {
             mode == AuthMode.DENY -> {

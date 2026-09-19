@@ -5,6 +5,9 @@
     <!-- LLM API 调用 + net.proxy 代理转发 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- notify.send：AI 生成的 UI 可发真实系统通知（运行时请求） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- haptics.tap -->
@@ -66,6 +69,11 @@
         android:supportsRtl="true">
 
         <activity
+            android:name=".miniapp.GenUiMiniAppActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
             android:name=".MainActivity"
             android:exported="true"
             android:windowSoftInputMode="adjustResize"
@@ -85,5 +93,9 @@
                     <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 </intent-filter>
             </receiver>
+    <service
+        android:name="com.genui.app.agent.AgentExecutionService"
+        android:exported="false"
+        android:foregroundServiceType="dataSync" />
     </application>
 </manifest>

@@ -1,6 +1,7 @@
 package com.genui.app.agent
 
 import android.content.Context
+import kotlinx.coroutines.launch
 import com.genui.app.agent.tools.BuiltinTools
 import com.genui.app.llm.LLMClient
 import com.genui.app.llm.Prompts
@@ -32,7 +33,9 @@ class AgentLoop(
     /** 结构化事件流：思考/决策/工具全过程。UI 用它画时间线。 */
     private val onEvent: (AgentEvent) -> Unit = {},
     /** 问答直答：用户在生成模式里提问/闲聊时，Agent 以文字回答（不渲染界面） */
-    private val onTextAnswer: (String) -> Unit = {}
+    private val onTextAnswer: (String) -> Unit = {},
+    /** 小程序画布直通：create_miniapp 成功后把 appId 交给画布层内嵌实时渲染（不跳独立程序） */
+    val onMiniAppCanvas: (String) -> Unit = {}
 ) {
     private val appContext = context.applicationContext
     val tools = BuiltinTools(appContext)
@@ -42,6 +45,10 @@ class AgentLoop(
     private val fast = com.genui.app.llm.FastClient(store)
 
     @Volatile var cancelled = false
+    /** 服务端按 max_tokens 截断（finish_reason=length）——GenScaffold 检测后自动续写 */
+    @Volatile var lengthCutoff = false
+    /** 本轮已成功创建的小程序 id（create_miniapp 成功后记录；决策轮见 MINIAPP_DELIVERED 即交付，不再画 HTML） */
+    private var miniAppDelivered: String? = null
         private set
     fun cancel() { cancelled = true; llm.cancel() }
 
@@ -63,7 +70,12 @@ class AgentLoop(
     ) {
         cancelled = false
         toolCallCount = 0
+        val failedTools = mutableListOf<String>()   // 本轮失败/被拒工具（渲染前点名用）
         onEvent(AgentEvent.Started(userPrompt, provider.name, provider.model))
+        val logCtx = store.context()
+        AgentLog.append(logCtx, "画布 · " + userPrompt.take(60).replace("\n", " "),
+            listOf("模型 ${provider.name} / ${provider.model}" +
+                (if (seedHtml != null) "（续写 ${seedHtml.length / 1024}KB）" else "")))
 
         val soul = soulStore.load() ?: soulStore.fallback
         val system = Prompts.systemWith(soul, tools.memory.indexForPrompt(), recentHistory())
@@ -80,12 +92,23 @@ class AgentLoop(
             "输出顺序必须是：先 [PLAN] 规划块，再做决策。禁止输出 HTML 文档。\n" +
             "[PLAN] 块格式（每行一条，不写废话）：\n" +
             "  需求：一句话说清用户要什么\n" +
-            "  通道：html|xml|compose|canvas + 一句理由（要数据/交互/MoBridge 必选 html）\n" +
+            "  画布：miniapp|html + 一句理由（见下方画布选择）\n" +
             "  功能：功能名 —— 真实实现(数据源：哪个工具/API) | 演示数据(界面需标注) | 不做(理由)\n" +
             "  数据：列出取数途径\n" +
-            "决策（三选一，跟在 [PLAN] 块之后）：\n" +
-            "a) 需要实时信息/记忆/设备能力 → 调用相应工具（可连续多个）；\n" +
-            "b) 用户要界面/页面/应用/工具/可视化/卡片 → 只回复四个字符：NO_TOOLS。\n" +
+            "# 画布选择（GenUI 不止 HTML 画布——先选对画布再动手）\n" +
+            "GenUI 有两类画布：\n" +
+            "· 【小程序画布】（自研引擎，类原生体验）：**有状态、频繁交互的轻应用**。" +
+            "硬性枚举（出现即必须选 miniapp）：记账/记账本/账单、待办/清单/TODO、计算器、计时器/秒表/番茄钟、" +
+            "日记/记事/笔记、单位换算、抽签/骰子/随机、小游戏、表单收集。\n" +
+            "· 【HTML 画布】（图文排版强）：适合**信息展示为主**——新闻页、报告、仪表盘、" +
+            "图表可视化、落地页、长图文、自我介绍页。判定：看/读为主，少量点击 → 选 html。\n" +
+            "决策（跟在 [PLAN] 块之后）：\n" +
+            "0) 用户原话点名了实现方式（\"用 html/网页\" 或 \"用小程序\"）→ 无条件照办，这是最高优先级。\n" +
+            "a) 需要实时信息/记忆/设备能力 → 调用相应工具（可连续多个），之后按默认决策；\n" +
+            "b) 交互型应用/工具（未点名）→ 默认 miniapp：调用 create_miniapp" +
+            "（files 完整可运行，真实逻辑+真实状态，尺寸全用 rpx）→ open_miniapp → 只回复 MINIAPP_DELIVERED；\n" +
+            "c) 纯展示内容（新闻/图文/报告/图表/官网，未点名）→ 回复 NO_TOOLS 走 html。\n" +
+            "两条路径都完整可用：小程序渲染在对话框卡片里（可试玩），HTML 渲染在画布上（可交互）。\n" +
             "★ 特例：用户让你『介绍你自己 / 展示你能做什么 / 自我介绍』→ 这是 GenUI 的" +
             "招牌演示场景，必须选 b) 渲染一个自我介绍页（把身份/能力/工作方式/原则做成" +
             "可视化界面呈现），严禁文字直答——文字介绍自己等于让厨师用嘴报菜名。\n" +
@@ -96,6 +119,19 @@ class AgentLoop(
         val messages = JSONArray()
             .put(JSONObject().put("role", "system").put("content", decisionSystem))
             .put(JSONObject().put("role", "user").put("content", userPrompt))
+
+        // ★ 小程序画布直通：交互类应用关键词命中 → 注入确定指令，不走犹豫的画布选择。
+        // 小程序渲染在对话框卡片里（用户主交互面），是 GenUI 的第一等交付形态——HTML 只是图文页的备选。
+        val wantsMini = wantsMiniApp(userPrompt)
+        val wantsHtml = wantsHtmlPage(userPrompt)
+        if (wantsMini && !wantsHtml) {
+            messages.put(JSONObject().put("role", "system").put("content",
+                "【推荐画布：小程序】这类需求适合小程序（渲染在对话框卡片里，用户可直接试玩）。\n" +
+                "调用 create_miniapp（files 给出完整可运行的 app.json/app.js/app.wxss/pages/index/index.{wxml,wxss,js}，" +
+                "真实逻辑+真实状态，尺寸全用 rpx），然后调用 open_miniapp 全屏打开，最后只回复：MINIAPP_DELIVERED\n" +
+                "（若用户原话明确要求用 HTML/网页实现，则忽略本条，回复 NO_TOOLS 走 HTML 画布。）\n"))
+            onEvent(AgentEvent.Thinking("推荐小程序画布（关键词直通）"))
+        }
 
         // 快速模型预检（专项模型分派的真实用途之一）：这条指令要不要先联网？
         // 失败/未配置时静默跳过，绝不阻塞主流程。
@@ -192,6 +228,26 @@ class AgentLoop(
                         // 且渲染轮自带全部上下文，无需把它塞回 messages。否则它会进入渲染轮
                         // 的 renderMsgs，模型在 <!DOCTYPE 前复述它，最终作为说明文字出现在画布顶部。
                         // 因此这里直接丢弃，只 break 进渲染轮。
+                        // ★ 小程序画布交付：create_miniapp 已成功 → 不再走 HTML 渲染轮，
+                        // 画布给一张交付卡（对话流里已有可交互小程序卡片、画布栈已入栈）
+                        if (miniAppDelivered != null) {
+                            val id = miniAppDelivered!!
+                            val card = "<!DOCTYPE html><html><head><meta charset=\"utf-8\">" +
+                                "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head>" +
+                                "<body style=\"margin:0;background:#141210;color:#F2EAD9;font-family:system-ui;" +
+                                "display:flex;align-items:center;justify-content:center;min-height:100vh\">" +
+                                "<div style=\"text-align:center;padding:32px\">" +
+                                "<div style=\"font-size:52px;margin-bottom:12px\">▦</div>" +
+                                "<h2 style=\"margin:0 0 8px;color:#D9A05B\">$id</h2>" +
+                                "<p style=\"color:#8a8378;font-size:14px;margin:0 0 6px\">小程序已在画布内打开，可直接交互</p>" +
+                                "<p style=\"color:#8a8378;font-size:12px;margin:0\">对话卡片同款可试玩；≡ → 栈 可随时回看</p>" +
+                                "</div></body></html>"
+                            onEvent(AgentEvent.Decided(0, "小程序画布交付 · $id"))
+                            onHtmlDelta(card)
+                            onMiniAppCanvas(id)   // 画布内嵌实时渲染（v0.26.8：不再只给说明卡）
+                            onDone(card, "小程序 · $id")
+                            return
+                        }
                         onEvent(AgentEvent.Decided(0, "信息已足够，开始写界面"))
                         break   // 进入渲染轮
                     }
@@ -250,9 +306,26 @@ class AgentLoop(
                         val t0 = System.currentTimeMillis()
                         val result = executeTool(name, args)
                         val cost = System.currentTimeMillis() - t0
+                        if (name == "create_miniapp" && !result.has("denied") && !result.has("error")) {
+                            miniAppDelivered = args.optString("app_id", "").ifBlank { null }
+                        }
+                        AgentLog.append(logCtx, "工具 · $name", listOf(
+                            (if (result.has("error")) "❌ " else "✅ ") + ToolSummarize.summarize(name, result).take(200)
+                                + " · ${com.genui.app.agent.ToolSummarize.fmtMs(cost)}"))
 
                         val denied = result.has("denied")
-                        val hasError = result.has("error")
+                        // 判定精细化（对齐 ChatSession）：有有效数据就不算失败
+                        val hasData = (result.optJSONArray("results")?.length() ?: 0) > 0 ||
+                            (result.optJSONArray("citations")?.length() ?: 0) > 0 ||
+                            (result.optJSONArray("items")?.length() ?: 0) > 0 ||
+                            result.optString("text").isNotBlank() ||
+                            result.optString("output").isNotBlank() ||
+                            result.optString("content").isNotBlank() ||
+                            result.optString("context").isNotBlank() ||
+                            result.optBoolean("ok", false)
+                        val hasError = result.has("error") && !hasData
+                        if (denied) failedTools.add("$name（用户未授权）")
+                        if (hasError) failedTools.add("$name：${result.optString("error").take(100)}")
                         val summary = when {
                             denied -> result.optString("denied")
                             hasError -> result.optString("error")
@@ -279,8 +352,13 @@ class AgentLoop(
                 }
             }
 
-            // ---------- 渲染轮（流式出 HTML） ----------
+            // ---------- 渲染轮（流式出 HTML，最多两遍：模板语法残留自动打回重画） ----------
             if (cancelled) return
+            var renderAttempt = 0
+            var retryNote: String? = null
+            val delivered = java.util.concurrent.atomic.AtomicReference<String?>(null)
+            while (true) {
+                renderAttempt++
             onStatus("写界面 · 流式渲染中")
             renderThinkBuf.setLength(0)
             lastThinkEmit = 0L
@@ -316,6 +394,22 @@ class AgentLoop(
             else
                 "基于以上全部信息，现在输出最终界面。只输出以 <!DOCTYPE html> 开头的完整 HTML 文档，不要任何解释。"
 
+            // —— 诚实性硬兜底：本轮失败/被拒工具逐条点名，渲染前注入 ——
+            // 提示词约束模型行为终有漏网（实测：全失败仍编新闻+谎报"已保存已通知"），
+            // 在渲染消息里点名失败清单，模型无法假装没看见。
+            if (failedTools.isNotEmpty()) {
+                renderMsgs.put(JSONObject().put("role", "user").put("content",
+                    "【系统校验 · 必读】本轮以下工具调用失败，共 " + failedTools.size + " 项：\n" +
+                    failedTools.mapIndexed { i, e -> "${i + 1}. $e" }.joinToString("\n") +
+                    "\n最终回复硬性要求：①严禁虚构以上失败工具本应产生的任何数据" +
+                    "（新闻/天气/文件内容/通知等）；②必须明确告知用户哪些功能失败及原因；" +
+                    "③严禁使用「已保存/已发送/已获取到」等成功话术——失败就是失败。"))
+            }
+
+            if (renderAttempt == 2 && retryNote != null) {
+                renderMsgs.put(JSONObject().put("role", "user").put("content",
+                    "【重画 · 必读】" + retryNote))
+            }
             if (isContinuation) {
                 renderMsgs.put(JSONObject().put("role", "user")
                     .put("content", "【已在画布上的文档尾部片段】\n```\n" + tail + "\n```\n\n" + closingTagHint))
@@ -374,6 +468,30 @@ class AgentLoop(
                 "  <button data-ga=\"speak:要朗读的文本\">朗读</button>           TTS 出声\n" +
                 "  <button data-ga=\"open:https://...\">打开</button>             浏览器打开\n" +
                 "  <button data-ga=\"vibrate\">震动</button>                      震动反馈\n" +
+                "\n# 移动端优先（画布是手机竖屏，逻辑宽约 390px——不是桌面显示器）\n" +
+                "1) 根容器 padding 16-24px（顶部额外留 40px 状态栏安全区）、单列纵向布局；" +
+                "2) 【禁止】固定像素宽度（width:900px 必溢出）——用 width:100%/flex:1/max-width；" +
+                "3) 字号 ≥14px、按钮/标签/输入框高度固定 44-56px【禁止用 flex:1 拉伸它们——flex:1 只给主内容列表区，" +
+                "分类标签/搜索框/按钮被 flex 拉伸会变成几屏高的竖条】；" +
+                "4) 横向元素用 flex 并允许换行（flex-wrap:wrap）。\n" +
+                "\n# 硬性语法红线（HTML 画布 = 纯静态 HTML，浏览器直接渲染）\n" +
+                "【严禁】任何模板引擎语法：{{ 插值 }}、v-if/v-for、wx:if、ng-*、{% %} 等——" +
+                "浏览器不认识它们，只会把 {{ todayText }} 裸露在页面上，页面等于废的。\n" +
+                "【数据必须内联为真实值】新闻条目、商品、列表项直接写具体内容（标题/数字/日期），" +
+                "或用 <script> 在页面里用 JS 数组+DOM 生成。\n" +
+                "\n# 原生渲染通道（HTML 是宿主，AI 可自由混搭原生块）\n" +
+                "在 HTML 里写以下结构，端上会把对应区域替换为真实原生渲染（WebView 之外的真控件）：\n" +
+                "· XML 原生布局：<!--stack:xml--> + <div id=\"gen-xml\"></div> 占位 + " +
+                "<script type=\"text/xml-layout\"> 里写 Android 原生控件 XML" +
+                "（LinearLayout/TextView/Button/ImageView/EditText/ScrollView 等，属性反射自由设置）。\n" +
+                "· Compose 组件：<!--stack:compose--> + <div id=\"gen-compose\"></div> + " +
+                "<script type=\"text/x-compose\"> 里写 JSON 组件树（{type:\"Column\",children:[{type:\"Text\",text:\"标题\"}]}，" +
+                "组件见 Compose 组件表：Column/Row/Text/Button/Card/TextField/Switch/Slider/LazyColumn…）。\n" +
+                "· GenCanvas：<!--stack:canvas--> + <div id=\"gen-canvas\"></div> + " +
+                "<script type=\"text/x-canvas\"> 里写绘制指令 JSON（op：rect/rrect/circle/svg/clip/group…）。\n" +
+                "占位容器上方建议留出高度（如 style=\"min-height:300px\"）。整页只有原生块时，宿主 HTML 也要给基本骨架。\n" +
+                "\n# A2UI 官方引擎（谷歌 A2UI v0.10——compose 通道的高级组件走官方渲染器）\n" +
+                com.genui.app.render.ComposeDescRenderer.A2UI_GUIDANCE + "\n" +
                 "\n# 质量自检（输出前心里过一遍）\n" +
                 "界面至少包含：清晰的层级标题、真实密度的内容、一处数据可视化（图表/进度/徽标任选）、" +
                 "至少一个可交互反馈（按钮按压态/状态切换/过渡动画）、内联 SVG 图标至少两枚。\n" +
@@ -402,15 +520,26 @@ class AgentLoop(
                         // 模型跑完若干轮思考却没吐出任何 HTML：绝不静默黑屏，明确报错让用户重试
                         onError("模型未输出任何界面内容（接口返回为空，或提示词过严导致模型困惑）。请重试，或换一种说法 / 换个模型。")
                     } else {
-                        onEvent(AgentEvent.Finished(
-                            title = extractTitle(html),
-                            bytes = html.length.toLong(),
-                            toolCalls = toolCallCount,
-                            elapsedMs = System.currentTimeMillis() - startedAt
-                        ))
-                        onDone(html, extractTitle(html))
+                        // ★ 结构完整性兜底（截断根修第二道）：部分中转/模型把 max_tokens 截断
+                        // 标成 finish_reason=stop，靠 finish_reason 检测会漏——HTML 没有 </html>
+                        // 收尾就是物理截断，直接置位触发上游自动续写
+                        if (!html.contains("</html>", ignoreCase = true) && html.length > 2048) {
+                            lengthCutoff = true
+                        }
+                        // ★ 模板语法残留校验：{{ }} 裸露 ≥3 处 = 页面必然残废（浏览器不渲染插值）。
+                        // 不交付废页——带错误反馈重画一次（纯 HTML + 内联数据）。
+                        val templateLeftovers = Regex("\\{\\{[^}]{1,60}\\}\\}").findAll(html).count()
+                        if (templateLeftovers >= 3 && renderAttempt == 1) {
+                            onStatus("检出模板语法残留（${templateLeftovers} 处）· 打回重画")
+                            retryNote = "上一次输出把 {{ 插值 }} 模板语法写进了 HTML——浏览器不认识，页面已废。" +
+                                "重画要求：1) 纯静态 HTML+CSS+JS，禁止任何 {{ }} / v-if / wx: 语法；" +
+                                "2) 所有数据（新闻条目/列表项/数字）内联写成真实具体内容，或用页面内 <script> JS 生成 DOM。"
+                            return@chatStream   // delivered 仍为 null → 外层 while 重画
+                        }
+                        delivered.set(html)
                     }
                 },
+                onLengthCutoff = { lengthCutoff = true },
                 onReasoning = { chunk ->
                     renderThinkBuf.append(chunk)
                     val now = System.currentTimeMillis()
@@ -423,15 +552,39 @@ class AgentLoop(
                 onError = { msg ->
                     if (deliver().isBlank()) throw RuntimeException(msg)
                     val html = deliver()
+                    if (!html.contains("</html>", ignoreCase = true) && html.length > 2048) {
+                        lengthCutoff = true
+                    }
+                    delivered.set(html)   // 有部分内容仍交付（走统一的循环尾交付逻辑）
+                }
+            )
+                // —— 循环尾：chatStream 结束，检查是否需要重画 / 统一交付 ——
+                var done = delivered.get()
+                if (done == null) {
+                    if (renderAttempt >= 2 || cancelled) {
+                        done = deliver()   // 两轮都残留模板语法：尽力交付最后一版
+                        if (done.isBlank()) break
+                    } else {
+                        continue           // 带重画提示再来一遍
+                    }
+                }
+                // ★ 交付前自检闭环：写完 ≠ 完成。看效果/查错误/测交互/修补，PAGE_VERIFIED 才交付。
+                kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    val finalHtml = runCatching { selfCheck(provider, done, userPrompt) }
+                        .getOrDefault(done)
+                    AgentLog.append(logCtx, "交付 · " + extractTitle(finalHtml), listOf(
+                        "${finalHtml.length / 1024}KB · 工具 ${toolCallCount} 次 · " +
+                            "耗时 ${String.format(java.util.Locale.US, "%.1f", (System.currentTimeMillis() - startedAt) / 1000.0)}s"))
                     onEvent(AgentEvent.Finished(
-                        title = extractTitle(html),
-                        bytes = html.length.toLong(),
+                        title = extractTitle(finalHtml),
+                        bytes = finalHtml.length.toLong(),
                         toolCalls = toolCallCount,
                         elapsedMs = System.currentTimeMillis() - startedAt
                     ))
-                    onDone(html, extractTitle(html))   // 有部分内容仍交付
+                    onDone(finalHtml, extractTitle(finalHtml))
                 }
-            )
+                break
+            }   // while (true) 渲染重画循环
         } catch (e: Exception) {
             if (!cancelled) {
                 val msg = e.message ?: "Agent 执行失败"
@@ -459,6 +612,24 @@ class AgentLoop(
         )
         return nouns.any { prompt.contains(it, ignoreCase = true) } ||
             selfShow.any { prompt.contains(it) }
+    }
+
+    /** 交互类应用关键词 → 小程序画布直通 */
+    private fun wantsMiniApp(prompt: String): Boolean {
+        val kws = listOf(
+            "记账", "账本", "待办", "清单", "todo", "TODO", "计算器", "番茄钟", "倒计时", "秒表",
+            "计时", "打卡", "签到", "记事", "日记", "笔记", "备忘", "换算", "抽签", "骰子",
+            "随机数", "小游戏", "密码生成", "bmi", "BMI", "小工具", "小程序", "习惯", "存钱", "预算")
+        return kws.any { prompt.contains(it, ignoreCase = true) }
+    }
+
+    /** 信息展示类关键词（或用户点名 html/web）→ HTML 画布。用户点名永远最高优先。 */
+    private fun wantsHtmlPage(prompt: String): Boolean {
+        val kws = listOf(
+            "html", "HTML", "Html", "web 页", "web页", "web app", "WebApp",
+            "新闻", "资讯", "文章", "报告", "仪表盘", "看板", "图表", "数据可视化",
+            "落地页", "官网", "介绍页", "网页", "网页版", "图文", "海报", "简历", "专题")
+        return kws.any { prompt.contains(it, ignoreCase = true) }
     }
 
     /** 续写/追问这类明确不需要联网的短指令，跳过预检省一次请求 */
@@ -496,6 +667,63 @@ class AgentLoop(
             else -> r.toString().take(56)
         }
     }.getOrDefault("完成")
+
+    /**
+     * 交付前自检轮（≤2 轮）：画布已渲染完成，AI 通过 page_preview（看效果）/ page_errors（查错）/
+     * page_eval（测交互+修补）验证自己写的界面，全部正常后回复 PAGE_VERIFIED。
+     * 只允许 page_* 与 vision_analyze；任何异常都静默放行（自检是增强，不是闸门）。
+     */
+    private suspend fun selfCheck(provider: ModelProvider, html: String, userPrompt: String): String {
+        // 等待画布稳定（流式刚结束，图表/动画/JS 初始化可能未跑完）
+        kotlinx.coroutines.delay(1200)
+        val decls = JSONArray()
+        run {
+            val allow = setOf("page_preview", "page_errors", "page_eval", "vision_analyze")
+            val all = tools.declarations()
+            for (i in 0 until all.length()) {
+                val d = all.optJSONObject(i) ?: continue
+                if (d.optJSONObject("function")?.optString("name") in allow) decls.put(d)
+            }
+        }
+        val msgs = JSONArray()
+            .put(JSONObject().put("role", "system").put("content",
+                "你是 GenUI 的交付自检员。画布上已渲染出为用户生成的界面（需求：" + userPrompt.take(200) + "）。\n" +
+                "写完不等于完成——现在验证它真的可用：\n" +
+                "1. 调 page_preview 看渲染效果（视觉模型可用会返回页面简评）；\n" +
+                "2. 调 page_errors 查 JS 运行时错误；\n" +
+                "3. 用 page_eval 测交互（查按钮数量、模拟 .click()、读关键 DOM 状态），发现小问题直接用 page_eval 修补；\n" +
+                "4. 全部正常（或已修补）→ 只回复四个词：PAGE_VERIFIED\n" +
+                "只许用上述工具，不要重新输出 HTML，不要长篇说明。"))
+            .put(JSONObject().put("role", "user").put("content", "开始自检。"))
+        var round = 0
+        while (round < 2 && !cancelled) {
+            val assistant = llm.chatOnce(provider, msgs, decls)
+            val content = assistant.optString("content")
+            val calls = assistant.optJSONArray("tool_calls")
+            if (content.contains("PAGE_VERIFIED")) return html
+            if (calls == null || calls.length() == 0) return html   // 模型放弃自检 → 照常交付
+            msgs.put(JSONObject().put("role", "assistant").put("content", content))
+            for (i in 0 until calls.length()) {
+                val call = calls.optJSONObject(i) ?: continue
+                val fn = call.optJSONObject("function") ?: continue
+                val name = fn.optString("name")
+                val args = runCatching { JSONObject(fn.optString("arguments", "{}")) }.getOrDefault(JSONObject())
+                val t0 = System.currentTimeMillis()
+                val result = runCatching { executeTool(name, args) }
+                    .getOrDefault(JSONObject().put("error", "工具执行失败"))
+                onEvent(AgentEvent.ToolStarted(call.optString("id") ?: "sc$i", name,
+                    "自检 · ${args.toString().take(80)}", 0, 0))
+                onEvent(AgentEvent.ToolFinished(call.optString("id") ?: "sc$i", name,
+                    System.currentTimeMillis() - t0, !result.has("error"),
+                    com.genui.app.agent.ToolSummarize.summarize(name, result)))
+                msgs.put(JSONObject().put("role", "tool")
+                    .put("tool_call_id", call.optString("id"))
+                    .put("content", result.toString()))
+            }
+            round++
+        }
+        return html
+    }
 
     private suspend fun executeTool(name: String, args: JSONObject): JSONObject {
         // 授权按"工具族"判定：memory_write 走 memory 的策略（权限屏设置的就是族名）。

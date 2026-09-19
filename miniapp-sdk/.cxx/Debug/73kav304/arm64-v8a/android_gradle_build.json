@@ -1,0 +1,44 @@
+{
+  "buildFiles": [
+    "/home/z/my-project/genui-upstream/miniapp-sdk/src/main/cpp/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/home/z/dev-env/android-sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/home/z/my-project/genui-upstream/miniapp-sdk/.cxx/Debug/73kav304/arm64-v8a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/home/z/dev-env/android-sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/home/z/my-project/genui-upstream/miniapp-sdk/.cxx/Debug/73kav304/arm64-v8a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "miniapp_engine::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "miniapp_engine",
+      "output": "/home/z/my-project/genui-upstream/miniapp-sdk/.cxx/Debug/73kav304/arm64-v8a/libminiapp_engine.a"
+    },
+    "miniappjs::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "miniappjs",
+      "output": "/home/z/my-project/genui-upstream/miniapp-sdk/build/intermediates/cxx/Debug/73kav304/obj/arm64-v8a/libminiappjs.so",
+      "runtimeFiles": []
+    }
+  },
+  "toolchains": {
+    "toolchain": {
+      "cCompilerExecutable": "/home/z/dev-env/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang.lld",
+      "cppCompilerExecutable": "/home/z/dev-env/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++.lld"
+    }
+  },
+  "cFileExtensions": [],
+  "cppFileExtensions": [
+    "cpp"
+  ]
+}

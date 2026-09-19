@@ -1,0 +1,6 @@
+# ninja log v5
+0	147	1789590412320339946	CMakeFiles/quropybridge.dir/pybridge.c.o	3dc1599c567d5b3f
+147	168	1789590412340341909	/home/z/my-project/genui-upstream/app/build/intermediates/cxx/Debug/441i4245/obj/arm64-v8a/libquropybridge.so	50078eccf9cdceb5
+0	10	0	clean	b8724b14837b8d47
+1	3231	1789657952939561644	CMakeFiles/quropybridge.dir/pybridge.c.o	3dc1599c567d5b3f
+3231	5173	1789657954857635328	/home/z/my-project/genui-upstream/app/build/intermediates/cxx/Debug/441i4245/obj/arm64-v8a/libquropybridge.so	50078eccf9cdceb5
