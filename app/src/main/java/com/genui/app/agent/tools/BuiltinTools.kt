@@ -404,10 +404,10 @@ class BuiltinTools(private val context: Context) {
 
     fun createMiniAppDecl(): JSONObject = rtDecl("create_miniapp", "创建一个完整的小程序（微信小程序语法：app.json/app.js/app.wxss + pages/index/index.{wxml,wxss,js}），保存成功后自动内嵌对话框卡片打开。若调用被打回（返回 error），错误里含具体文件与原因——必须按提示修正后重新调 create_miniapp（通常一次即成），禁止因打回放弃小程序改用网页交付。适合：待办、计算器、查数工具等小应用。【尺寸单位：全部用 rpx（750rpx=整屏宽），禁止 px——否则手机上溢出】【布局：手机竖屏单列；display:flex 必须同时写 flex-direction:column（引擎对未写 direction 的容器一律纵向排布，想横排必须显式 flex-direction:row 且记得 flex-wrap）】【真功能标准（最高优先）】：写出来的小程序必须是完整可用的真实功能，不是演示骨架——能取真实数据就取真实数据。内置免密钥数据源配方：天气 wttr.in/{城市}?format=j1（JSON，含 current_condition/weather 三日预报）、汇率 open.er-api.com/v6/latest/{币种}、城市坐标用 wx.getLocation 或让用户提供；本地数据用 wx.setStorageSync 持久化（记账/待办数据必须持久化，重启不丢）。【多页】：app.json 的 pages 数组列出全部页面路径（每页 pages/xxx/xxx.{wxml,wxss,js} 四件套齐全），页内 wx.navigateTo({url:'/pages/xxx/xxx'}) 跳转；首屏页放 pages[0]。【JS 语法边界（自研引擎，规范式完整声明）】支持：var/let/const；function/箭头函数/闭包；运算符全套（算术/比较===、逻辑、三元?:、取模、位运算、++/--、+=复合赋值、typeof、instanceof、delete）；控制流全套（if/else、for/while/do-while、switch/case、break/continue、try/catch/throw、for-in/for-of）；字符串拼接+；JSON；正则。内置对象全量可用：Math(round/floor/ceil/abs/max/min/pow/sqrt/random/sign/trig)、Date(当前时间/getTime/getFullYear…)、JSON.parse/stringify、Array.isArray + 数组方法 22 个(push/pop/shift/unshift/slice/splice/concat/join/indexOf/lastIndexOf/includes/forEach/map/filter/some/every/find/findIndex/reduce/reverse/sort)、字符串方法 20+（split/join/replace/match/search/indexOf/substring/substr/charAt/charCodeAt/toUpperCase/toLowerCase/trim/padStart/startsWith/includes…）、Object.keys/values/assign/entries/fromEntries、parseInt/parseFloat/isNaN/isFinite、encodeURIComponent/decodeURIComponent、setTimeout/setInterval/clearTimeout/clearInterval、console.log、RegExp。全局入口：Page({data, onLoad/onShow, 方法…})、App({globalData})、getApp()、wx.*。【禁用（引擎不存在，预检直接打回）】：模板字符串(反引号)、解构、展开(...)、默认参数、对象方法简写、class、async/await、yield、可选链?.、空值合并??、new Promise/Map/Set/Symbol/Proxy/WeakMap/Intl/WebAssembly。",
         JSONObject()
-            .put("app_id", JSONObject().put("type", "string").put("description", "英文短 id，如 weather-tool"))
+            .put("app_id", JSONObject().put("type", "string").put("description", "可选，缺省自动从 title 生成；支持中文/英文/数字"))
             .put("title", JSONObject().put("type", "string").put("description", "显示标题（写入 app.json 的 navigationBarTitleText）"))
             .put("files", JSONObject().put("type", "object").put("description", "相对路径到文件内容的映射，路径不以 / 开头：{\"app.json\":\"...\",\"app.js\":\"...\",\"app.wxss\":\"...\",\"pages/index/index.wxml\":\"...\",\"pages/index/index.wxss\":\"...\",\"pages/index/index.js\":\"...\"}")),
-        listOf("app_id", "files"))
+        listOf("files"))
 
     fun runPyDecl(): JSONObject = rtDecl("run_python",
         "在 GenUI 内置真实 CPython 3.12 解释器中执行 Python 代码（完整 stdlib：json/re/math/datetime/urllib/hashlib/itertools/collections…）。print 输出与异常 traceback 均回传。适合：文本处理、数学计算、数据转换、协议模拟、算法实现。注意：无第三方库（无 requests/numpy），网络用 urllib；纯计算代码即可 return 无需——用 print 输出结果。",
@@ -781,10 +781,14 @@ class BuiltinTools(private val context: Context) {
     }
 
     private fun createMiniApp(appId: String, args: JSONObject): JSONObject {
-        // v0.28.5：app_id 支持中文/Unicode（TA 点名补齐）——内部目录名做确定性安全映射，
-        // 同名 id 永远映射到同一目录（open/list 自动兼容）
-        if (appId.isBlank() || appId.length > 64)
-            throw IllegalArgumentException("app_id 需 1-64 字符（支持中文/英文/数字），且不能为空")
+        // v0.28.10：app_id 完全可选——AI 漏传时自动生成（交付优先，不因元数据阻断）
+        //   优先从 title 推导（safeDirName 保证文件系统安全），无 title 用时间戳
+        var appId = appId.ifBlank {
+            val t = args.optString("title", "")
+            if (t.isNotBlank()) t else "app" + (System.currentTimeMillis() / 1000)
+        }
+        if (appId.length > 64)
+            throw IllegalArgumentException("app_id 过长（>64 字符），请缩短")
         if (appId in setOf("hello", "todo", "hello 小程序"))
             throw IllegalArgumentException("app_id '$appId' 与内置示例冲突，请换一个名字")
         val files = args.optJSONObject("files")
@@ -911,7 +915,7 @@ class BuiltinTools(private val context: Context) {
         val totalBytes = keys.sumOf { (java.io.File(root, it).length() / 1L) }
         if (totalBytes < 600) jsonWarnings.add(
             "小程序内容过于单薄（共 ${totalBytes}B）——疑似骨架未填功能，请补全完整业务逻辑与界面后重做")
-        val ret = JSONObject().put("created", appId)
+        val ret = JSONObject().put("created", appId).put("app_id", appId)
             .put("root", root.absolutePath)
             .put("files", org.json.JSONArray(keys))
             .put("syntax", "checked")
