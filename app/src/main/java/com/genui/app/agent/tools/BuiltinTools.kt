@@ -402,7 +402,7 @@ class BuiltinTools(private val context: Context) {
             .put("parameters", JSONObject().put("type", "object")
                 .put("properties", props).put("required", JSONArray(required))))
 
-    fun createMiniAppDecl(): JSONObject = rtDecl("create_miniapp", "创建一个完整的小程序（微信小程序语法：app.json/app.js/app.wxss + pages/index/index.{wxml,wxss,js}），保存成功后自动内嵌对话框卡片打开。若调用被打回（返回 error），错误里含具体文件与原因——必须按提示修正后重新调 create_miniapp（通常一次即成），禁止因打回放弃小程序改用网页交付。适合：待办、计算器、查数工具等小应用。【尺寸单位：全部用 rpx（750rpx=整屏宽），禁止 px——否则手机上溢出】【布局：手机竖屏单列；display:flex 必须同时写 flex-direction:column（引擎对未写 direction 的容器一律纵向排布，想横排必须显式 flex-direction:row 且记得 flex-wrap）】【多页】：app.json 的 pages 数组列出全部页面路径（每页 pages/xxx/xxx.{wxml,wxss,js} 四件套齐全），页内 wx.navigateTo({url:'/pages/xxx/xxx'}) 跳转；首屏页放 pages[0]。【JS 语法边界（自研引擎，必须严格遵守否则被打回）】：支持 var/let/const、function 声明/表达式、箭头函数、闭包、对象/数组字面量（普通 key:value 写法）、字符串 + 拼接、if/else/for/while、JSON、Page({data:{...}, onTap: function(){ this.setData({...}) }})、App({})、wx.* API；【禁用】模板字符串（反引号）、解构、展开(...)、默认参数、对象方法简写、class、async/await、可选链?.、空值合并??。",
+    fun createMiniAppDecl(): JSONObject = rtDecl("create_miniapp", "创建一个完整的小程序（微信小程序语法：app.json/app.js/app.wxss + pages/index/index.{wxml,wxss,js}），保存成功后自动内嵌对话框卡片打开。若调用被打回（返回 error），错误里含具体文件与原因——必须按提示修正后重新调 create_miniapp（通常一次即成），禁止因打回放弃小程序改用网页交付。适合：待办、计算器、查数工具等小应用。【尺寸单位：全部用 rpx（750rpx=整屏宽），禁止 px——否则手机上溢出】【布局：手机竖屏单列；display:flex 必须同时写 flex-direction:column（引擎对未写 direction 的容器一律纵向排布，想横排必须显式 flex-direction:row 且记得 flex-wrap）】【多页】：app.json 的 pages 数组列出全部页面路径（每页 pages/xxx/xxx.{wxml,wxss,js} 四件套齐全），页内 wx.navigateTo({url:'/pages/xxx/xxx'}) 跳转；首屏页放 pages[0]。【JS 语法边界（自研引擎，规范式完整声明）】支持：var/let/const；function/箭头函数/闭包；运算符全套（算术/比较===、逻辑、三元?:、取模、位运算、++/--、+=复合赋值、typeof、instanceof、delete）；控制流全套（if/else、for/while/do-while、switch/case、break/continue、try/catch/throw、for-in/for-of）；字符串拼接+；JSON；正则。内置对象全量可用：Math(round/floor/ceil/abs/max/min/pow/sqrt/random/sign/trig)、Date(当前时间/getTime/getFullYear…)、JSON.parse/stringify、Array.isArray + 数组方法 22 个(push/pop/shift/unshift/slice/splice/concat/join/indexOf/lastIndexOf/includes/forEach/map/filter/some/every/find/findIndex/reduce/reverse/sort)、字符串方法 20+（split/join/replace/match/search/indexOf/substring/substr/charAt/charCodeAt/toUpperCase/toLowerCase/trim/padStart/startsWith/includes…）、Object.keys/values/assign/entries/fromEntries、parseInt/parseFloat/isNaN/isFinite、encodeURIComponent/decodeURIComponent、setTimeout/setInterval/clearTimeout/clearInterval、console.log、RegExp。全局入口：Page({data, onLoad/onShow, 方法…})、App({globalData})、getApp()、wx.*。【禁用（引擎不存在，预检直接打回）】：模板字符串(反引号)、解构、展开(...)、默认参数、对象方法简写、class、async/await、yield、可选链?.、空值合并??、new Promise/Map/Set/Symbol/Proxy/WeakMap/Intl/WebAssembly。",
         JSONObject()
             .put("app_id", JSONObject().put("type", "string").put("description", "英文短 id，如 weather-tool"))
             .put("title", JSONObject().put("type", "string").put("description", "显示标题（写入 app.json 的 navigationBarTitleText）"))
@@ -869,6 +869,20 @@ class BuiltinTools(private val context: Context) {
                 com.yuanbao.miniapp.view.WxmlParser().parse(java.io.File(root, wf).readText())
             } catch (e: Exception) {
                 wxmlWarnings.add("WXML 解析警告 @$wf：${e.message?.take(200)}")
+            }
+        }
+        // ③.5 运行时黑名单扫描（v0.28.7）：现代内建对象引擎不存在——解析放行、运行时才炸的
+        //   唯一确定类，静态扫描 fail-closed 拦截（零误杀）
+        val runtimeBlacklist = Regex(
+            "new\\s+(Promise|Map|Set|WeakMap|WeakSet|Symbol|Proxy|Intl)\\b|WebAssembly|\\basync\\s+function|\\byield\\b")
+        for (jsf in keys.filter { it.endsWith(".js") }.sorted()) {
+            val code = java.io.File(root, jsf).readText()
+            runtimeBlacklist.find(code)?.let { m ->
+                root.deleteRecursively()
+                throw IllegalArgumentException(
+                    "JS 运行时能力不支持 @$jsf：检测到「${m.value.trim()}」。\n" +
+                    "自研引擎没有 Promise/Map/Set/Symbol/Proxy 等现代内建对象（全表见工具说明）。" +
+                    "异步/集合需求请用回调与普通对象数组改写后重新调 create_miniapp。")
             }
         }
         // ④ JS 语法预检：引擎级解析，只解析不执行（历史版本已验证无误杀，保留 fail-closed；
