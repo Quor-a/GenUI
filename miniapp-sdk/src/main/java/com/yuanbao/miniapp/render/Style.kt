@@ -183,6 +183,8 @@ class Style {
     var trTranslateX: Float = 0f; var trTranslateY: Float = 0f
     var trRotate: Float = 0f; var trScale: Float = 1f
     var trSet = false
+    var fontFamily: String = ""
+    var fontFamilySet = false
     var color: Int = Color.BLACK
     var fontSize: Float = 16f          // px
     var fontWeight: FontWeight = FontWeight.NORMAL
@@ -228,6 +230,7 @@ class Style {
             trTranslateX = other.trTranslateX; trTranslateY = other.trTranslateY
             trRotate = other.trRotate; trScale = other.trScale; trSet = true
         }
+        if (other.fontFamilySet) { fontFamily = other.fontFamily; fontFamilySet = true }
         if (other.colorSet) color = other.color
         if (other.fontSizeSet) fontSize = other.fontSize
         if (other.weightSet) fontWeight = other.fontWeight
@@ -288,6 +291,7 @@ class Style {
         s.margin = margin; s.padding = padding
         s.position = position; s.left = left; s.top = top; s.right = right; s.bottom = bottom
         s.backgroundColor = backgroundColor; s.color = color
+        s.fontFamily = fontFamily; s.fontFamilySet = fontFamilySet
         s.fontSize = fontSize; s.fontWeight = fontWeight; s.lineHeight = lineHeight
         s.textAlign = textAlign; s.borderRadius = borderRadius
         s.borderWidth = borderWidth; s.borderColor = borderColor
@@ -396,6 +400,7 @@ class Style {
                             }
                         }
                     }
+                    "font-family" -> { s.fontFamily = v.trim('"', '\''); s.fontFamilySet = true }
                     "transform" -> {
                         // 支持 translate(x,y) / rotate(deg) / scale(n) 空格分隔组合
                         for (fn in Regex("(translate|rotate|scale)\\(([^)]*)\\)").findAll(v)) {

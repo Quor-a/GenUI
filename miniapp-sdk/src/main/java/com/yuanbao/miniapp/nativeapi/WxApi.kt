@@ -110,6 +110,7 @@ class WxApi(
             "chooseImage" -> sensitive("camera") { chooseImage(list) }
             "scanCode" -> sensitive("camera") { scanCode(list) }
             "setUrlWhitelist" -> setUrlWhitelist(list)
+            "loadFontFace" -> loadFontFace(list)
             "stopPullDownRefresh" -> "null"
             "hideHomeButton" -> "null"
             else -> "null"
@@ -487,6 +488,43 @@ class WxApi(
     private fun cbResult(cb: Json?, result: Json) {
         if (cb == null) return
         logicHandler.post { callCallback(cb, writeJson(result)) }
+    }
+
+    /** 包引用（字体等包内资源），由 MiniAppView.start 注入 */
+    var packageRef: com.yuanbao.miniapp.pack.MiniPackage? = null
+
+    // ---- 字体引用（v0.28.6）：source = "url(https://…ttf)" 或 "package:assets/fonts/x.ttf" ----
+    private fun loadFontFace(list: List<Json>): String {
+        val o = list.getOrNull(0) as? Json.Obj
+        val family = (o?.getOrNull("family") as? Json.Str)?.value ?: ""
+        val source = (o?.getOrNull("source") as? Json.Str)?.value ?: ""
+        if (family.isEmpty() || source.isEmpty()) return fail(o, "loadFontFace:fail missing family/source")
+        runCatching {
+            val tf = when {
+                source.startsWith("url(http") -> {
+                    val f = java.io.File(context.cacheDir, "gs_font_${family.hashCode()}.ttf")
+                    val conn = java.net.URL(source.removePrefix("url(").removeSuffix(")"))
+                        .openConnection() as java.net.HttpURLConnection
+                    conn.connectTimeout = 8000
+                    conn.inputStream.use { input -> f.outputStream().use { input.copyTo(it) } }
+                    android.graphics.Typeface.createFromFile(f)
+                }
+                source.startsWith("package:") -> {
+                    val bytes = packageRef?.readBytes(source.removePrefix("package:"))
+                    if (bytes == null) null
+                    else {
+                        val f = java.io.File(context.cacheDir, "gs_font_${family.hashCode()}.ttf")
+                        f.writeBytes(bytes)
+                        android.graphics.Typeface.createFromFile(f)
+                    }
+                }
+                else -> null
+            }
+            if (tf == null) throw IllegalStateException("typeface load failed")
+            com.yuanbao.miniapp.render.CanvasPainter.registerFont(family, tf)
+            cbResult(o, Json.obj("errMsg" to Json.Str("loadFontFace:ok")))
+        }.onFailure { fail(o, "loadFontFace:fail ${it.message}") }
+        return "pending"
     }
 
     // ------------------------------------------------------------ navigation

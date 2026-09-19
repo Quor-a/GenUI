@@ -72,8 +72,21 @@ class MiniWebViewRenderer(
 
     private fun loadPackage() {
         val html = buildDocument()
+        lastBuiltHtml = html
         webView.loadDataWithBaseURL("https://genui-miniapp.local/", html, "text/html", "UTF-8", null)
     }
+
+    companion object {
+        /** 网站版小程序：整包编译为独立 HTML（浏览器可直接打开/分享/托管） */
+        fun buildPackageHtml(context: Context, pkg: MiniPackage, appId: String): String {
+            val tmp = MiniWebViewRenderer(context, pkg, appId)
+            val html = tmp.lastBuiltHtml
+            tmp.release()
+            return html
+        }
+    }
+
+    var lastBuiltHtml: String = ""
 
     /** 整包编译：所有页面的 HTML/JS/WXSS 预编译进单文档，运行时按 hash 路由展开 */
     private fun buildDocument(): String {

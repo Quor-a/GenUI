@@ -26,6 +26,12 @@ class CanvasPainter {
     /** Images resolved by the host (src -> bitmap). */
     var imageProvider: ((src: String) -> Bitmap?)? = null
 
+    companion object {
+        /** 自定义字体注册表：loadFontFace 加载后全局生效（family -> Typeface） */
+        val fontRegistry = LinkedHashMap<String, android.graphics.Typeface>()
+        fun registerFont(family: String, tf: android.graphics.Typeface) { fontRegistry[family] = tf }
+    }
+
     /** px per rpx, kept in sync with the layout engine. */
     var rpxRatio: Float = 1f
 
@@ -167,6 +173,15 @@ class CanvasPainter {
     }
 
     private fun drawText(canvas: Canvas, node: RenderNode) {
+        // 字体引用（v0.28.6）：loadFontFace 注册的自定义字体优先，系统 family（monospace/serif…）兜底
+        val family = node.style.fontFamily
+        if (family.isNotEmpty()) {
+            textPaint.typeface = fontRegistry[family]
+                ?: android.graphics.Typeface.create(family, if (node.style.fontWeight == FontWeight.BOLD) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+        } else {
+            textPaint.typeface = if (node.style.fontWeight == FontWeight.BOLD)
+                android.graphics.Typeface.DEFAULT_BOLD else android.graphics.Typeface.DEFAULT
+        }
         val st = node.style
         val lines = node.lines
         if (lines.isEmpty()) return

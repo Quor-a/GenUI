@@ -266,6 +266,11 @@ class BuiltinTools(private val context: Context) {
                 JSONObject().put("app_id", JSONObject().put("type", "string").put("description", "小程序 id")),
                 listOf("app_id")))
             .put(createMiniAppDecl())
+            .put(rtDecl("export_miniapp_web",
+                "把已创建的小程序导出为【网站版】独立 HTML 文件（浏览器直接打开/上传静态托管/分享链接），一次生成三端可用（安卓小程序卡+画布+网页）。导出路径会返回。",
+                JSONObject().put("app_id", JSONObject().put("type", "string")
+                    .put("description", "已创建的小程序 app_id")),
+                listOf("app_id")))
     }
 
     // ---------- 执行分发 ----------
@@ -380,6 +385,7 @@ class BuiltinTools(private val context: Context) {
             "list_miniapps" -> listMiniApps()
             "open_miniapp" -> openMiniApp(args.optString("app_id", ""))
             "create_miniapp" -> createMiniApp(args.optString("app_id", ""), args)
+            "export_miniapp_web" -> exportMiniAppWeb(args.optString("app_id", ""))
             "calendar_query" -> calendarQuery(args.optInt("days", 7))
             "calendar_add" -> calendarAdd(
                 args.optString("title"), args.optString("begin"),
@@ -900,6 +906,27 @@ class BuiltinTools(private val context: Context) {
             ret.put("warnings", org.json.JSONArray(wxmlWarnings))
                 .put("hint", ret.optString("hint") + " 注意存在 WXML 解析警告（不阻塞），建议检查标签闭合与 wx:for 语法。")
         return ret
+    }
+
+    /** 网站版小程序：整包编译成独立 HTML（浏览器直接打开/托管/分享——一次生成三端可用） */
+    private fun exportMiniAppWeb(appId: String): JSONObject {
+        if (appId.isBlank()) throw IllegalArgumentException("app_id 不能为空")
+        val dirName = safeDirName(appId)
+        val root = java.io.File(miniAppsRoot(), dirName)
+        if (!root.isDirectory) {
+            // 回退内置 assets 包
+            if (runCatching { context.assets.list("miniprograms/$dirName")?.isNotEmpty() == true }.getOrDefault(false))
+                throw IllegalArgumentException("内置示例请用 open_miniapp 打开；导出仅支持用户创建的小程序")
+            throw IllegalArgumentException("小程序不存在：$appId（可先 list_miniapps）")
+        }
+        val pkg = com.yuanbao.miniapp.pack.MiniPackage.fromDirectory(root, dirName)
+        val html = com.yuanbao.miniapp.webview.MiniWebViewRenderer
+            .buildPackageHtml(context, pkg, dirName)
+        val out = java.io.File(context.getExternalFilesDir(null) ?: context.filesDir, "$dirName.web.html")
+        out.writeText(html)
+        return JSONObject().put("exported", out.absolutePath)
+            .put("url_hint", "文件可直接用浏览器打开，或上传到任意静态托管（GitHub Pages/对象存储）变成可分享的网站版小程序")
+            .put("size_kb", (out.length() / 1024.0).toInt())
     }
 
     private fun calendarQuery(days: Int): JSONObject {
