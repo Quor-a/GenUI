@@ -60,7 +60,29 @@ class CanvasPainter {
 
         // background + border
         rect.set(node.absX, node.absY, node.absX + node.width, node.absY + node.height)
-        if (st.backgroundColor != Color.TRANSPARENT) {
+        if (st.bgGradient != null) {
+            // linear-gradient：按角度铺满节点矩形，圆角同纯色路径（AI 背景自由——渐变/氛围底色全支持）
+            val g = st.bgGradient!!
+            val rad = Math.toRadians(g.angleDeg.toDouble())
+            val cx = node.width / 2f; val cy = node.height / 2f
+            val len = (Math.abs(node.width * Math.sin(rad)) + Math.abs(node.height * Math.cos(rad))).toFloat()
+            val x0 = cx - (Math.sin(rad) * len / 2).toFloat(); val y0 = cy - (Math.cos(rad) * len / 2).toFloat()
+            val x1 = cx + (Math.sin(rad) * len / 2).toFloat(); val y1 = cy + (Math.cos(rad) * len / 2).toFloat()
+            fillPaint.style = Paint.Style.FILL
+            fillPaint.shader = android.graphics.LinearGradient(
+                x0, y0, x1, y1,
+                g.stops.map { it.first }.toIntArray(),
+                g.stops.map { it.second }.toFloatArray(),
+                android.graphics.Shader.TileMode.CLAMP)
+            if (st.borderRadius > 0f) {
+                path.reset()
+                path.addRoundRect(rect, st.borderRadius, st.borderRadius, Path.Direction.CW)
+                canvas.drawPath(path, fillPaint)
+            } else {
+                canvas.drawRect(rect, fillPaint)
+            }
+            fillPaint.shader = null
+        } else if (st.backgroundColor != Color.TRANSPARENT) {
             fillPaint.color = st.backgroundColor
             fillPaint.style = Paint.Style.FILL
             if (st.borderRadius > 0f) {

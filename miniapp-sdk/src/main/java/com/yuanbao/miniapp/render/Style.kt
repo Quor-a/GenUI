@@ -39,6 +39,96 @@ data class EdgeInsets(val top: Length, val right: Length, val bottom: Length, va
 
 /** Supported display / layout values (self-developed, not Android View layout). */
 enum class Display { FLEX, BLOCK, NONE }
+
+/** CSS linear-gradient 线性渐变（AI 背景自由的一部分） */
+data class Gradient(val angleDeg: Float, val stops: List<Pair<Int, Float>>) {
+    companion object {
+        private val CSS_COLORS = mapOf(
+            "white" to 0xFFFFFFFF, "black" to 0xFF000000, "red" to 0xFFFF0000,
+            "green" to 0xFF008000, "blue" to 0xFF0000FF, "yellow" to 0xFFFFFF00,
+            "orange" to 0xFFFFA500, "purple" to 0xFF800080, "gray" to 0xFF808080,
+            "grey" to 0xFF808080, "pink" to 0xFFFFC0CB, "brown" to 0xFFA52A2A,
+            "transparent" to 0x00000000
+        )
+        fun parse(v: String): Gradient? {
+            val inner = v.substringAfter('(').substringBeforeLast('(').let { s ->
+                v.substring(v.indexOf('(') + 1, v.lastIndexOf(')'))
+            }
+            val parts = splitTopLevel(inner)
+            if (parts.isEmpty()) return null
+            var angle = 180f                                  // CSS 默认 to bottom = 180deg
+            var first = parts[0].trim()
+            if (first.endsWith("deg")) {
+                angle = first.removeSuffix("deg").toFloatOrNull() ?: 180f
+                return build(angle, parts.drop(1))
+            }
+            if (first.startsWith("to ")) {
+                angle = when (first.removePrefix("to ").trim()) {
+                    "top" -> 0f; "right" -> 90f; "bottom" -> 180f; "left" -> 270f
+                    "top right" -> 45f; "bottom right" -> 135f
+                    "bottom left" -> 225f; "top left" -> 315f
+                    else -> 180f
+                }
+                return build(angle, parts.drop(1))
+            }
+            return build(angle, parts)
+        }
+        private fun build(angle: Float, stops: List<String>): Gradient? {
+            if (stops.size < 2) return null
+            val list = ArrayList<Pair<Int, Float>>()
+            val n = stops.size
+            stops.forEachIndexed { i, raw ->
+                val s = raw.trim()
+                val colorPart = s.substringBefore(' ').trim()
+                val pos = s.substringAfter(' ', "").trim().removeSuffix("%").toFloatOrNull()
+                    ?.div(100f) ?: (if (n == 1) 0f else i.toFloat() / (n - 1))
+                val argb = parseCssColor(colorPart) ?: return null
+                list.add(argb to pos.coerceIn(0f, 1f))
+            }
+            return Gradient(angle, list.sortedBy { it.second })
+        }
+        /** #rgb/#rrggbb/#aarrggbb/rgb()/rgba()/CSS 命名色 → ARGB int */
+        fun parseCssColor(c: String): Int? {
+            val t = c.trim().removePrefix("#")
+            t.toLongOrNull(16)?.let { hex ->
+                return when (t.length) {
+                    3 -> {
+                        val r = hex shr 8 and 0xF; val g = hex shr 4 and 0xF; val b = hex and 0xF
+                        (0xFF000000L or (r * 17 shl 16) or (g * 17 shl 8) or (b * 17)).toInt()
+                    }
+                    6 -> (0xFF000000L or hex).toInt()
+                    8 -> hex.toInt()
+                    else -> null
+                }
+            }
+            val low = t.lowercase()
+            if (low.startsWith("rgba(") || low.startsWith("rgb(")) {
+                val nums = t.substringAfter('(').substringBefore(')').split(',')
+                if (nums.size >= 3) {
+                    val r = nums[0].trim().toFloatOrNull()?.toInt() ?: return null
+                    val g = nums[1].trim().toFloatOrNull()?.toInt() ?: return null
+                    val b = nums[2].trim().toFloatOrNull()?.toInt() ?: return null
+                    val a = if (nums.size > 3) ((nums[3].trim().toFloatOrNull() ?: 1f) * 255).toInt() else 255
+                    return (a.coerceIn(0, 255) shl 24) or (r.coerceIn(0, 255) shl 16) or
+                        (g.coerceIn(0, 255) shl 8) or b.coerceIn(0, 255)
+                }
+            }
+            return CSS_COLORS[low]?.toInt()
+        }
+        /** 按逗号切分但忽略括号/rgba() 内的逗号 */
+        private fun splitTopLevel(s: String): List<String> {
+            val out = ArrayList<String>(); var depth = 0; var cur = StringBuilder()
+            for (c in s) when {
+                c == '(' -> { depth++; cur.append(c) }
+                c == ')' -> { depth--; cur.append(c) }
+                c == ',' && depth == 0 -> { out.add(cur.toString()); cur = StringBuilder() }
+                else -> cur.append(c)
+            }
+            if (cur.isNotBlank()) out.add(cur.toString())
+            return out
+        }
+    }
+}
 enum class FlexDirection { ROW, ROW_REVERSE, COLUMN, COLUMN_REVERSE }
 enum class JustifyContent { FLEX_START, FLEX_END, CENTER, SPACE_BETWEEN, SPACE_AROUND }
 enum class AlignItems { FLEX_START, FLEX_END, CENTER, STRETCH }
@@ -82,6 +172,8 @@ class Style {
     var bottom: Length = Length.AUTO
 
     var backgroundColor: Int = Color.TRANSPARENT
+    /** linear-gradient 解析结果：角度(度) + 色标列表；null=纯色 */
+    var bgGradient: Gradient? = null
     var color: Int = Color.BLACK
     var fontSize: Float = 16f          // px
     var fontWeight: FontWeight = FontWeight.NORMAL
@@ -118,7 +210,7 @@ class Style {
         if (other.topSet) top = other.top
         if (other.rightSet) right = other.right
         if (other.bottomSet) bottom = other.bottom
-        if (other.bgSet) backgroundColor = other.backgroundColor
+        if (other.bgSet) { backgroundColor = other.backgroundColor; bgGradient = other.bgGradient }
         if (other.colorSet) color = other.color
         if (other.fontSizeSet) fontSize = other.fontSize
         if (other.weightSet) fontWeight = other.fontWeight
@@ -276,7 +368,13 @@ class Style {
                     "top" -> { s.top = Length.parse(v); s.topSet = true }
                     "right" -> { s.right = Length.parse(v); s.rightSet = true }
                     "bottom" -> { s.bottom = Length.parse(v); s.bottomSet = true }
-                    "background", "background-color" -> { parseColor(v)?.let { s.backgroundColor = it; s.bgSet = true } }
+                    "background", "background-color" -> {
+                        val tv = v.trim()
+                        if (tv.startsWith("linear-gradient")) {
+                            // linear-gradient([Ndeg|to bottom/right/...], color, color, ...) —— AI 背景自由
+                            Gradient.parse(tv)?.let { s.bgGradient = it; s.bgSet = true }
+                        } else parseColor(tv)?.let { s.backgroundColor = it; s.bgSet = true }
+                    }
                     "color" -> { parseColor(v)?.let { s.color = it; s.colorSet = true } }
                     "font-size" -> { s.fontSize = parsePx(v); s.fontSizeSet = true }
                     "font-weight" -> { s.fontWeight = if (v == "bold" || v.toIntOrNull() ?: 0 >= 600) FontWeight.BOLD else FontWeight.NORMAL; s.weightSet = true }

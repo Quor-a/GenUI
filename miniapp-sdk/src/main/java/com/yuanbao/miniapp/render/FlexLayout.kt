@@ -39,11 +39,12 @@ class FlexLayout(private val viewportWidth: Float, private val viewportHeight: F
             node.width = 0f; node.height = 0f
             return
         }
-        // 引擎级鲁棒决策（v0.27.2）：AI 生成场景"写 display:flex 漏写 flex-direction"是高频
-        // 错误（pomodoro 整页横排的根因），CSS 标准的 ROW 初值在手机上产出废页。规则改为：
-        // 未显式写 flex-direction 一律 COLUMN（纵向单列）；想横排必须显式写 flex-direction:row。
+        // 标准语义（v0.27.3 恢复，TA 定调：AI 对布局/位置拥有完整主权，引擎忠实执行声明）：
+        // 显式 display:flex 未写 direction → CSS 标准 ROW；块级容器（微信 view 默认）→ 纵向堆叠。
+        // AI 生成质量由提示词教全（display:flex 必写 direction），引擎不替 AI 做主。
         if (!st.flexDirectionSet) {
-            st.flexDirection = FlexDirection.COLUMN
+            st.flexDirection = if (st.display == Display.FLEX) FlexDirection.ROW
+                               else FlexDirection.COLUMN
         }
         val padH = resolve(st.padding.left, availW) + resolve(st.padding.right, availW)
         val padV = resolve(st.padding.top, availH) + resolve(st.padding.bottom, availH)
@@ -204,6 +205,23 @@ class FlexLayout(private val viewportWidth: Float, private val viewportHeight: F
         if (st.overflow == Overflow.SCROLL) {
             node.contentWidth = contentW
             node.contentHeight = contentH
+        }
+        // absolute 子元素：AI 写在哪就定位在哪（top/left/right/bottom 相对本节点 content 区，
+        // 支持 px/rpx/%；未写的轴保持流位置）。背景/浮层/角标全靠它（v0.27.3）
+        for (c in node.children) {
+            val cs = c.style
+            if (cs.position != PositionType.ABSOLUTE) continue
+            val l = resolveOrNull(cs.left, contentW)
+            val t = resolveOrNull(cs.top, contentH)
+            val r = resolveOrNull(cs.right, contentW)
+            val b = resolveOrNull(cs.bottom, contentH)
+            var x = c.x; var y = c.y
+            if (l != null) x = contentX + l
+            else if (r != null) x = contentX + contentW - r - c.width
+            if (t != null) y = contentY + t
+            else if (b != null) y = contentY + contentH - b - c.height
+            c.x = x; c.y = y
+            layoutChildren(c, c.width, c.height)
         }
     }
 

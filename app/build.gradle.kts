@@ -16,8 +16,8 @@ android {
     ndkVersion = "27.0.12077973"
         minSdk = 26
         targetSdk = 36
-        versionCode = 111
-        versionName = "0.27.2"
+        versionCode = 112
+        versionName = "0.27.3"
     }
 
     // 项目固定签名：signing/genui.keystore（口令直接写在本文件，debug 级可接受）。
