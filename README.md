@@ -177,3 +177,9 @@ GenUI 原生通道兼容 **Google A2UI 协议**的组件树（`heading/image/che
 - **flutter_genui**（Flutter 官方）— LLM Tool Calling → Component Catalog → 原生 Widget
 - **CopilotKit/generative-ui** — A2UI / AG-UI / MCP Apps 三种示例
 - GUI Agent 方向：GELab-Zero（阶跃星辰）、Open-AutoGLM、AndroidGen（智谱）、ghost（A2UI+MCP+A2A）
+
+
+## 开源协议
+
+- **自研代码**（`app/src/main/java/com/genui/app/`、`miniapp-sdk/`、`app/src/main/cpp/`、`assets/runtimes/genui-*.js`）：**Apache License 2.0**，100% 开源，见根目录 [LICENSE](./LICENSE)。
+- **第三方组件**（A2UI-Android 引擎、JS 运行时库、字体、Python 运行时等）：保留其**各自原始许可证**，未作任何变更——清单见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
