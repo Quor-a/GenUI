@@ -1,6 +1,7 @@
 package com.yuanbao.miniapp.nativeapi
 
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import android.os.Handler
 import android.os.Looper
@@ -67,7 +68,11 @@ class WxApi(
             "getStorageSync" -> getStorage(list)
             "removeStorageSync" -> removeStorage(list)
             "clearStorageSync" -> { prefs.edit().clear().apply(); "null" }
-            "request" -> request(list)
+            "request" -> run {
+                val url = ((list.getOrNull(0) as? Json.Obj)?.getOrNull("url") as? Json.Str)?.value ?: ""
+                checkWhitelist(url)?.let { return it }
+                request(list)
+            }
             "navigateTo" -> navigate(list, false)
             "redirectTo" -> navigate(list, true)
             "navigateBack" -> navigateBack(list)
@@ -90,6 +95,21 @@ class WxApi(
             "getClipboardData" -> getClipboard(list)
             "getNetworkType" -> networkType()
             "makePhoneCall" -> makePhoneCall(list)
+            // ---- v0.28.4 系统能力补齐（全部接） ----
+            "getLocation" -> sensitive("location") { getLocation(list) }
+            "openLocation" -> sensitive("location") { openLocation(list) }
+            "startRecord" -> sensitive("record") { startRecord(list) }
+            "stopRecord" -> stopRecord(list)
+            "createInnerAudioContext" -> createAudio(list)
+            "startDeviceMotionListening" -> startMotion(list)
+            "stopDeviceMotionListening" -> stopMotion(list)
+            "openBluetoothAdapter" -> sensitive("ble") { bleOpen(list) }
+            "startBluetoothDevicesDiscovery" -> bleDiscovery(list)
+            "stopBluetoothDevicesDiscovery" -> { bleStop(); "null" }
+            "closeBluetoothAdapter" -> { bleClose(); "null" }
+            "chooseImage" -> sensitive("camera") { chooseImage(list) }
+            "scanCode" -> sensitive("camera") { scanCode(list) }
+            "setUrlWhitelist" -> setUrlWhitelist(list)
             "stopPullDownRefresh" -> "null"
             "hideHomeButton" -> "null"
             else -> "null"
@@ -220,6 +240,253 @@ class WxApi(
             }
         }
         return "null"
+    }
+
+    // ---- v0.28.4 敏感 API 二次授权（包级记忆，允许一次后续免弹） ----
+    private val granted = HashSet<String>()
+    private fun sensitive(perm: String, impl: () -> String): String {
+        if (perm in granted) return impl()
+        val gate = Object()
+        var allowed = false; var done = false
+        mainHandler.post {
+            runCatching {
+                val names = mapOf("location" to "位置信息", "record" to "麦克风",
+                    "camera" to "相机", "ble" to "蓝牙")
+                val dlg = android.app.AlertDialog.Builder(context)
+                    .setTitle("权限申请")
+                    .setMessage("本小程序申请使用${names[perm] ?: perm}，是否允许？")
+                    .setPositiveButton("允许") { _, _ -> synchronized(gate){ allowed = true; done = true; gate.notifyAll() } }
+                    .setNegativeButton("拒绝") { _, _ -> synchronized(gate){ done = true; gate.notifyAll() } }
+                    .setCancelable(false)
+                // overlay 可能未挂窗口——容错直接放行
+                runCatching { dlg.show() }.onFailure { synchronized(gate){ allowed = true; done = true; gate.notifyAll() } }
+            }.onFailure { synchronized(gate){ allowed = true; done = true; gate.notifyAll() } }
+        }
+        synchronized(gate) { while (!done) gate.wait(15000) }
+        return if (allowed) { granted.add(perm); impl() }
+        else writeJson(Json.obj("errMsg" to Json.Str("$perm:fail auth deny")))
+    }
+
+    // ---- 域名白名单（空 set = 放行全部） ----
+    val urlWhitelist = mutableSetOf<String>()
+    private fun setUrlWhitelist(list: List<Json>): String {
+        val arr = (list.getOrNull(0) as? Json.Obj)?.getOrNull("urls") as? Json.Arr
+        urlWhitelist.clear()
+        arr?.items?.forEach { (it as? Json.Str)?.value?.let { u -> urlWhitelist.add(u) } }
+        return "null"
+    }
+
+    private fun checkWhitelist(url: String): String? =
+        if (urlWhitelist.isEmpty() || urlWhitelist.any { url.startsWith(it) }) null
+        else writeJson(Json.obj("errMsg" to Json.Str("request:fail url not in domain whitelist")))
+
+    // ---- 位置 ----
+    private fun getLocation(list: List<Json>): String {
+        val cb = list.getOrNull(0)
+        val lm = context.getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager
+        if (lm == null) return fail(cb, "getLocation:fail no service")
+        val last = lm.getProviders(true)?.mapNotNull { lm.getLastKnownLocation(it) }?.maxByOrNull { it.time }
+        if (last != null) {
+            cbResult(cb, Json.obj(
+                "latitude" to Json.Num(last.latitude), "longitude" to Json.Num(last.longitude),
+                "speed" to Json.Num(last.speed.toDouble()), "accuracy" to Json.Num(last.accuracy.toDouble())))
+            return "pending"
+        }
+        // 无缓存 → 单次更新
+        val provider = android.location.LocationManager.GPS_PROVIDER
+        runCatching {
+            lm.requestSingleUpdate(provider, { loc ->
+                cbResult(cb, Json.obj(
+                    "latitude" to Json.Num(loc.latitude), "longitude" to Json.Num(loc.longitude),
+                    "speed" to Json.Num(loc.speed.toDouble()), "accuracy" to Json.Num(loc.accuracy.toDouble())))
+            }, null)
+        }.onFailure { fail(cb, "getLocation:fail ${it.message}") }
+        return "pending"
+    }
+
+    private fun openLocation(list: List<Json>): String {
+        val o = list.getOrNull(0) as? Json.Obj
+        val lat = (o?.getOrNull("latitude") as? Json.Num)?.value ?: 0.0
+        val lng = (o?.getOrNull("longitude") as? Json.Num)?.value ?: 0.0
+        val uri = android.net.Uri.parse("geo:$lat,$lng?q=$lat,$lng")
+        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+        return "null"
+    }
+
+    // ---- 录音（MediaRecorder，AAC→filesDir） ----
+    private var recorder: android.media.MediaRecorder? = null
+    private var recordPath: String? = null
+    private fun startRecord(list: List<Json>): String {
+        if (recorder != null) return fail(list.getOrNull(0), "startRecord:fail already recording")
+        val out = java.io.File(context.filesDir, "gs_record_${System.currentTimeMillis()}.m4a")
+        val r: android.media.MediaRecorder = if (android.os.Build.VERSION.SDK_INT >= 31)
+            android.media.MediaRecorder(context)
+        else @Suppress("DEPRECATION") android.media.MediaRecorder()
+        runCatching {
+            r.setAudioSource(android.media.MediaRecorder.AudioSource.MIC)
+            r.setOutputFormat(android.media.MediaRecorder.OutputFormat.MPEG_4)
+            r.setAudioEncoder(android.media.MediaRecorder.AudioEncoder.AAC)
+            r.setAudioEncodingBitRate(96000); r.setAudioSamplingRate(44100)
+            r.setOutputFile(out.absolutePath); r.prepare(); r.start()
+            recorder = r; recordPath = out.absolutePath
+        }.onFailure {
+            return fail(list.getOrNull(0), "startRecord:fail ${it.message}")
+        }
+        return "null"
+    }
+    private fun stopRecord(list: List<Json>): String {
+        val r = recorder ?: return fail(list.getOrNull(0), "stopRecord:fail no active record")
+        val cb = list.getOrNull(0)
+        runCatching {
+            r.stop(); r.release()
+            val path = recordPath ?: ""
+            recorder = null
+            cbResult(cb, Json.obj("tempFilePath" to Json.Str(path)))
+        }.onFailure {
+            runCatching { r.release() }; recorder = null
+            return fail(cb, "stopRecord:fail ${it.message}")
+        }
+        return "null"
+    }
+
+    // ---- 音频播放（InnerAudioContext 简化版：返回句柄 id，action API 控制） ----
+    private var audioSeq = 0
+    private val audioPlayers = HashMap<Int, android.media.MediaPlayer>()
+    private val audioSrc = HashMap<Int, String>()
+    private fun createAudio(list: List<Json>): String {
+        val id = ++audioSeq
+        val mp = android.media.MediaPlayer()
+        audioPlayers[id] = mp
+        audioPlayers[id] = mp
+        cbResult(list.getOrNull(0), Json.obj("audioId" to Json.Num(id.toDouble())))
+        return "null"
+    }
+    fun audioAction(audioId: Int, action: String, src: String?, volume: Float): String {
+        val mp = audioPlayers[audioId] ?: return "null"
+        runCatching {
+            when (action) {
+                "play" -> {
+                    if (src != null && audioSrc[audioId] != src) {
+                        mp.reset(); mp.setDataSource(src); mp.prepare()
+                        audioSrc[audioId] = src
+                    }
+                    mp.setVolume(volume, volume); mp.start()
+                }
+                "pause" -> mp.pause()
+                "stop" -> { mp.stop(); mp.prepare() }
+                "destroy" -> { mp.release(); audioPlayers.remove(audioId) }
+            }
+        }
+        return "null"
+    }
+
+    // ---- 传感器（三轴设备运动） ----
+    private var motionListener: android.hardware.SensorEventListener? = null
+    private fun startMotion(list: List<Json>): String {
+        val sm = context.getSystemService(Context.SENSOR_SERVICE) as? android.hardware.SensorManager
+            ?: return fail(list.getOrNull(0), "startDeviceMotionListening:fail no sensor")
+        val cb = list.getOrNull(0)
+        if (motionListener == null) {
+            motionListener = object : android.hardware.SensorEventListener {
+                override fun onSensorChanged(e: android.hardware.SensorEvent) {
+                    cbResult(cb, Json.obj(
+                        "x" to Json.Num(e.values[0].toDouble()),
+                        "y" to Json.Num(e.values[1].toDouble()),
+                        "z" to Json.Num(e.values[2].toDouble())))
+                }
+                override fun onAccuracyChanged(s: android.hardware.Sensor?, a: Int) {}
+            }
+            runCatching { sm.registerListener(motionListener!!,
+                sm.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER),
+                android.hardware.SensorManager.SENSOR_DELAY_GAME) }
+                .onFailure { return fail(cb, "startDeviceMotionListening:fail ${it.message}") }
+        }
+        return "null"
+    }
+    private fun stopMotion(list: List<Json>): String {
+        val sm = context.getSystemService(Context.SENSOR_SERVICE) as? android.hardware.SensorManager
+        motionListener?.let { sm?.unregisterListener(it) }
+        motionListener = null
+        return "null"
+    }
+
+    // ---- BLE 扫描（v1：适配器+发现；GATT 连接 v2） ----
+    private var bleScanner: android.bluetooth.le.BluetoothLeScanner? = null
+    private fun bleOpen(list: List<Json>): String {
+        val bm = context.getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
+            ?: return fail(list.getOrNull(0), "openBluetoothAdapter:fail no bluetooth")
+        bleScanner = bm.adapter?.bluetoothLeScanner
+        if (bleScanner == null) return fail(list.getOrNull(0), "openBluetoothAdapter:fail not supported")
+        return "null"
+    }
+    private fun bleDiscovery(list: List<Json>): String {
+        val scanner = bleScanner ?: return fail(list.getOrNull(0), "startBluetoothDevicesDiscovery:fail adapter closed")
+        val cb = list.getOrNull(0)
+        runCatching {
+            scanner.startScan(object : android.bluetooth.le.ScanCallback() {
+                override fun onScanResult(callbackType: Int, result: android.bluetooth.le.ScanResult) {
+                    cbResult(cb, Json.obj(
+                        "devices" to Json.Arr(mutableListOf(Json.obj(
+                            "deviceId" to Json.Str(result.device.address),
+                            "name" to Json.Str(result.device.name ?: ""),
+                            "RSSI" to Json.Num(result.rssi.toDouble()))))))
+                }
+            })
+        }.onFailure { return fail(cb, "startBluetoothDevicesDiscovery:fail ${it.message}") }
+        return "null"
+    }
+    private fun bleStop() { runCatching { bleScanner?.stopScan(bleScanCb) } }
+    private var bleScanCb: android.bluetooth.le.ScanCallback? = null
+    private fun bleClose() { bleStop(); bleScanner = null }
+
+    // ---- 相册选图 / 扫码（Intent 类：全屏宿主回调） ----
+    var intentBridge: ((Intent, Int) -> Unit)? = null            // 宿主 Activity 注入 startActivityForResult
+    private var pendingIntentReq = 0
+    private fun chooseImage(list: List<Json>): String {
+        val cb = list.getOrNull(0)
+        val bridge = intentBridge ?: return fail(cb, "chooseImage:fail need fullscreen host")
+        val req = ++pendingIntentReq
+        pendingChoose[req] = cb
+        bridge(Intent(Intent.ACTION_GET_CONTENT).apply { type = "image/*" }
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), req)
+        return "pending"
+    }
+    val pendingChoose = HashMap<Int, Json?>()
+    private fun scanCode(list: List<Json>): String {
+        val cb = list.getOrNull(0)
+        val bridge = intentBridge ?: return fail(cb, "scanCode:fail need fullscreen host")
+        val req = ++pendingIntentReq
+        pendingChoose[req] = cb
+        val intent = Intent("com.google.zxing.client.android.SCAN")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (intent.resolveActivity(context.packageManager) == null)
+            return fail(cb, "scanCode:fail no scanner app installed")
+        bridge(intent, req)
+        return "pending"
+    }
+
+    /** 宿主 onActivityResult 转发入口 */
+    fun onIntentResult(req: Int, data: Intent?) {
+        val cb = pendingChoose.remove(req) ?: return
+        val uri = data?.data
+        if (uri == null) { fail(cb, "chooseImage:fail cancel"); return }
+        val path = java.io.File(context.filesDir, "gs_pick_${System.currentTimeMillis()}.img")
+        runCatching {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                path.outputStream().use { input.copyTo(it) }
+            }
+            cbResult(cb, Json.obj("tempFilePaths" to Json.Arr(mutableListOf(Json.Str(path.absolutePath))),
+                "tempFiles" to Json.Arr(mutableListOf(Json.obj("path" to Json.Str(path.absolutePath))))))
+        }.onFailure { fail(cb, "chooseImage:fail ${it.message}") }
+    }
+
+    private fun fail(cb: Json?, msg: String): String {
+        if (cb != null) cbResult(cb, Json.obj("errMsg" to Json.Str(msg)))
+        return writeJson(Json.obj("errMsg" to Json.Str(msg)))
+    }
+    private fun cbResult(cb: Json?, result: Json) {
+        if (cb == null) return
+        logicHandler.post { callCallback(cb, writeJson(result)) }
     }
 
     // ------------------------------------------------------------ navigation
