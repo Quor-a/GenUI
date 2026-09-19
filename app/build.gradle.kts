@@ -17,7 +17,7 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = 122
-        versionName = "0.28.7"
+        versionName = "0.28.8"
     }
 
     // 项目固定签名：signing/genui.keystore（口令直接写在本文件，debug 级可接受）。

@@ -33,3 +33,27 @@
 
 ## 3. 依赖关系
 Studio(3) 依赖 组件库(5)+UI库(6)+排版(4) 成熟 → 组件库依赖 自定义组件(5) → 语言扩展(2) 服务于组件与 Studio 编辑器 → 自适应(7) 贯穿全部 UI 层 → 热更新(10) 依赖 Studio 后端(3)。
+
+
+## 4. 小程序系统（迷你 OS）与插件架构（v0.30 总体设计）
+
+**目标**：miniapp-sdk 从"渲染 SDK"升格为"跑在 GenUI 里的小程序操作系统"。
+
+### 系统服务层（SysServ，v0.30 分阶段）
+| 服务 | 职责 | 现状 |
+|---|---|---|
+| PackageService | 包注册/版本/签名/劫持防护 | ✅ v0.27.4/27.5 |
+| PermissionCenter | 敏感 API 二次授权+包级记忆+用户可撤销 | ✅ v0.28.4（撤销 UI → Studio） |
+| NetworkGate | 域名白名单/请求审计 | ✅ v0.28.4 |
+| StorageService | per-app prefs 隔离 | ✅ |
+| EnginePool | 多小程序并存引擎实例管理（当前单实例） | v0.30 |
+| CardService | **小卡片**：小程序页面快照渲染为对话卡/桌面卡片（AppWidget）、头像（包内 icon.png → 卡片圆角头像） | v0.30 |
+| ShareService | 分享（ACTION_SEND + genui://miniapp 深链） | ✅ v0.28.8 |
+| DeepLink | genui://miniapp/<id>?page=…（manifest 已注册，MainActivity 解析直达） | ✅ v0.28.8 |
+| PluginHost | **自研插件架构**：插件=带 manifest 的特殊包（声明 plugin-id/capabilities），小程序经 wx.requirePlugin 调用；首批插件：图表（Canvas 2D 封装）、地图（WebView 桥）、扫码 | v0.30 |
+| 真功能配方库 | 免密钥数据源清单（天气 wttr.in/汇率 er-api/…）写进生成声明 | ✅ v0.28.8 |
+
+### 已接线
+- 分享 wx.share（系统面板 + genui:// 深链）✅
+- genui://miniapp/<id> 深链 intent-filter（manifest）✅——任何入口（链接/二维码/分享文本）直达对应小程序
+- 真功能配方（天气/汇率/持久化）进 create_miniapp 声明 ✅

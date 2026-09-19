@@ -147,9 +147,10 @@ class MiniAppView @JvmOverloads constructor(
     // ------------------------------------------------------------ lifecycle
     fun start(packageLoader: MiniPackage, config: AppConfig) {
         pkg = packageLoader
-        wxApi.packageRef = packageLoader
         appConfig = config
         wxApi = WxApi(context, this, overlay)
+        wxApi.packageRef = packageLoader
+        wxApi.pkgId = packageLoader.appId
         logic = LogicRuntime(packageLoader, wxApi, this, object : LogicRuntime.EngineListener {
             override fun onLog(level: String, message: String) { logListener?.invoke(level, message) }
             override fun onError(message: String) { errorListener?.invoke(message) }

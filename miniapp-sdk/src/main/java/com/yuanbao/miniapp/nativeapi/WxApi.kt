@@ -111,6 +111,7 @@ class WxApi(
             "scanCode" -> sensitive("camera") { scanCode(list) }
             "setUrlWhitelist" -> setUrlWhitelist(list)
             "loadFontFace" -> loadFontFace(list)
+            "share" -> share(list)
             "stopPullDownRefresh" -> "null"
             "hideHomeButton" -> "null"
             else -> "null"
@@ -492,6 +493,7 @@ class WxApi(
 
     /** 包引用（字体等包内资源），由 MiniAppView.start 注入 */
     var packageRef: com.yuanbao.miniapp.pack.MiniPackage? = null
+    var pkgId: String = ""
 
     // ---- 字体引用（v0.28.6）：source = "url(https://…ttf)" 或 "package:assets/fonts/x.ttf" ----
     private fun loadFontFace(list: List<Json>): String {
@@ -525,6 +527,24 @@ class WxApi(
             cbResult(o, Json.obj("errMsg" to Json.Str("loadFontFace:ok")))
         }.onFailure { fail(o, "loadFontFace:fail ${it.message}") }
         return "pending"
+    }
+
+    // ---- 分享（v0.28.8）：系统分享面板 + genui:// 深链（接收端 MainActivity 解析直达小程序） ----
+    private fun share(list: List<Json>): String {
+        val o = list.getOrNull(0) as? Json.Obj
+        val title = (o?.getOrNull("title") as? Json.Str)?.value ?: "GenUI 小程序"
+        val path = (o?.getOrNull("path") as? Json.Str)?.value ?: ""
+        val link = "genui://miniapp/$pkgId" + (if (path.isNotEmpty()) "?page=" + java.net.URLEncoder.encode(path, "UTF-8") else "")
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, "$title\n$link")
+            putExtra(Intent.EXTRA_TITLE, title)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching {
+            context.startActivity(Intent.createChooser(send, "分享到").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+        return "null"
     }
 
     // ------------------------------------------------------------ navigation
