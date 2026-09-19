@@ -396,7 +396,7 @@ class BuiltinTools(private val context: Context) {
             .put("parameters", JSONObject().put("type", "object")
                 .put("properties", props).put("required", JSONArray(required))))
 
-    fun createMiniAppDecl(): JSONObject = rtDecl("create_miniapp", "创建一个完整的小程序（微信小程序语法：app.json/app.js/app.wxss + pages/index/index.{wxml,wxss,js}），保存成功后自动内嵌对话框卡片打开。适合：待办、计算器、查数工具等小应用。【尺寸单位：全部用 rpx（750rpx=整屏宽），禁止 px——否则手机上溢出】【布局：手机竖屏单列；display:flex 必须同时写 flex-direction:column（引擎对未写 direction 的容器一律纵向排布，想横排必须显式 flex-direction:row 且记得 flex-wrap）】【多页】：app.json 的 pages 数组列出全部页面路径（每页 pages/xxx/xxx.{wxml,wxss,js} 四件套齐全），页内 wx.navigateTo({url:'/pages/xxx/xxx'}) 跳转；首屏页放 pages[0]。【JS 语法边界（自研引擎，必须严格遵守否则被打回）】：支持 var/let/const、function 声明/表达式、箭头函数、闭包、对象/数组字面量（普通 key:value 写法）、字符串 + 拼接、if/else/for/while、JSON、Page({data:{...}, onTap: function(){ this.setData({...}) }})、App({})、wx.* API；【禁用】模板字符串（反引号）、解构、展开(...)、默认参数、对象方法简写、class、async/await、可选链?.、空值合并??。",
+    fun createMiniAppDecl(): JSONObject = rtDecl("create_miniapp", "创建一个完整的小程序（微信小程序语法：app.json/app.js/app.wxss + pages/index/index.{wxml,wxss,js}），保存成功后自动内嵌对话框卡片打开。若调用被打回（返回 error），错误里含具体文件与原因——必须按提示修正后重新调 create_miniapp（通常一次即成），禁止因打回放弃小程序改用网页交付。适合：待办、计算器、查数工具等小应用。【尺寸单位：全部用 rpx（750rpx=整屏宽），禁止 px——否则手机上溢出】【布局：手机竖屏单列；display:flex 必须同时写 flex-direction:column（引擎对未写 direction 的容器一律纵向排布，想横排必须显式 flex-direction:row 且记得 flex-wrap）】【多页】：app.json 的 pages 数组列出全部页面路径（每页 pages/xxx/xxx.{wxml,wxss,js} 四件套齐全），页内 wx.navigateTo({url:'/pages/xxx/xxx'}) 跳转；首屏页放 pages[0]。【JS 语法边界（自研引擎，必须严格遵守否则被打回）】：支持 var/let/const、function 声明/表达式、箭头函数、闭包、对象/数组字面量（普通 key:value 写法）、字符串 + 拼接、if/else/for/while、JSON、Page({data:{...}, onTap: function(){ this.setData({...}) }})、App({})、wx.* API；【禁用】模板字符串（反引号）、解构、展开(...)、默认参数、对象方法简写、class、async/await、可选链?.、空值合并??。",
         JSONObject()
             .put("app_id", JSONObject().put("type", "string").put("description", "英文短 id，如 weather-tool"))
             .put("title", JSONObject().put("type", "string").put("description", "显示标题（写入 app.json 的 navigationBarTitleText）"))
@@ -800,27 +800,32 @@ class BuiltinTools(private val context: Context) {
         // ★ 创建时校验（v0.26.6 重写：校验器自身故障绝不能阻塞创建——v0.26.5 的
         //   miniapp-sdk parseJson 返回 sealed class Json，被 as? Map 转换恒失败，导致合法
         //   app.json 全部误报"缺 pages 数组"、创建 7 连败。原则：确定失败才打回，存疑放行。）
-        // ① app.json 可解析且 pages 非空（org.json，行为确定，fail-closed）
+        // ① app.json：软校验（v0.27.4）——元数据不规范不阻断交付：自动生成兜底 app.json
+        //   （入口 = files 里第一个含 .wxml 的页面），警告随结果返回供 AI 下次自纠。
+        //   交付优先：白屏根因（指令/布局）已在渲染层修复，元数据问题不再 fail-closed。
         val cfgPath = java.io.File(root, "app.json")
-        if (!cfgPath.isFile) {
-            root.deleteRecursively()
-            throw IllegalArgumentException("缺 app.json（包结构必需）：{\"pages\":[\"pages/index/index\"],\"window\":{\"navigationBarTitleText\":\"标题\"}}")
-        }
-        val pages: List<String> = try {
-            val cfg = org.json.JSONObject(cfgPath.readText())
-            val arr = cfg.optJSONArray("pages")
-            if (arr == null || arr.length() == 0) {
-                root.deleteRecursively()
-                throw IllegalArgumentException("app.json 校验失败：缺 pages 数组或为空\n" +
-                    "标准结构：{\"pages\":[\"pages/index/index\"],\"window\":{\"navigationBarTitleText\":\"标题\"}}")
+        val jsonWarnings = mutableListOf<String>()
+        val pages: List<String> = run {
+            val parsed = runCatching {
+                val arr = org.json.JSONObject(cfgPath.takeIf { it.isFile }?.readText() ?: "{}")
+                    .optJSONArray("pages")
+                if (arr == null || arr.length() == 0) null
+                else (0 until arr.length()).map { arr.getString(it) }
+            }.getOrNull()
+            if (parsed != null) parsed
+            else {
+                val entry = keys.filter { it.endsWith(".wxml") }.minOrNull()?.removeSuffix(".wxml")
+                if (entry == null) {
+                    root.deleteRecursively()
+                    throw IllegalArgumentException("files 里没有任何 .wxml 页面文件——小程序至少需要一个页面（如 pages/index/index.wxml）。补齐后重新调 create_miniapp。")
+                }
+                val fixed = org.json.JSONObject()
+                    .put("pages", org.json.JSONArray().put(entry))
+                    .put("window", org.json.JSONObject().put("navigationBarTitleText", title))
+                cfgPath.writeText(fixed.toString())
+                jsonWarnings.add("app.json 缺失/无效，已自动生成兜底（入口页 $entry）")
+                listOf(entry)
             }
-            (0 until arr.length()).map { arr.getString(it) }
-        } catch (e: IllegalArgumentException) {
-            throw e
-        } catch (e: Exception) {
-            // JSON 内容本身读不了才到这——真坏，打回
-            root.deleteRecursively()
-            throw IllegalArgumentException("app.json 无法解析：${e.message?.take(200)}")
         }
         // ② 每个页面的 wxml/js 必须存在（wxss 可选；文件系统检查，零误杀）
         for (p in pages) {
@@ -834,7 +839,7 @@ class BuiltinTools(private val context: Context) {
         }
         // ③ WXML 试解析：软校验（fail-open）——解析器误报不删包不打回，
         //    警告随创建结果返回供 AI 自纠；坏 WXML 打开时引擎会自行报错
-        val wxmlWarnings = mutableListOf<String>()
+        val wxmlWarnings = jsonWarnings
         for (wf in keys.filter { it.endsWith(".wxml") }.sorted()) {
             try {
                 com.yuanbao.miniapp.view.WxmlParser().parse(java.io.File(root, wf).readText())
