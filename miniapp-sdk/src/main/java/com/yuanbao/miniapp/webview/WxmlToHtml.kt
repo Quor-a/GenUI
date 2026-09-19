@@ -89,10 +89,8 @@ object WxmlToHtml {
         for (m in r.findAll(s)) {
             if (m.range.first > last) out.append(' ').append(s.substring(last, m.range.first).trim())
             last = m.range.last + 1
-            val name = (m.groupValues[1].ifEmpty { m.groupValues[3] + m.groupValues[2].let { "" } }).ifEmpty {
-                // 事件绑定分支（bindtap="x"）
-                m.value.substringBefore('=').trim()
-            }
+            // 事件绑定分支（bindtap="x"）必须取完整属性名；标准属性取 groupValues[1]
+            val name = m.groupValues[1].ifEmpty { m.value.substringBefore('=').trim() }
             val rawVal = m.groupValues[2].ifEmpty { m.groupValues[4] }
             val value = rawVal.trim('"', '\'')
             emitAttr(name, value, tag, out)
@@ -110,8 +108,9 @@ object WxmlToHtml {
                 out.append(" data-gs-on-").append(evt).append("=\"")
                     .append(escapeAttr(value)).append('"')
             }
-            n.startsWith("wx:") ->                                   // 指令 → data-gs-wx
-                out.append(" data-gs-").append(n).append("=\"").append(escapeAttr(value)).append('"')
+            n.startsWith("wx:") ->                                   // 指令 → data-gs-wx-xxx（冒号转横线！）
+                out.append(" data-gs-").append(n.replace(':', '-'))
+                    .append("=\"").append(escapeAttr(value)).append('"')
             n == "src" && tag == "img" -> {
                 val v = if (value.startsWith("{{") || value.contains("{{"))
                     value else resolveAssetPath(value)

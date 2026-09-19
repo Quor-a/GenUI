@@ -59,7 +59,14 @@ class MiniWebViewRenderer(
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) { /* 首屏由运行时驱动 */ }
         }
-        webView.webChromeClient = WebChromeClient()
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
+                val m = consoleMessage ?: return super.onConsoleMessage(consoleMessage)
+                if (m.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.ERROR)
+                    onError("JS: ${m.message().take(200)} @${m.lineNumber()}")
+                return super.onConsoleMessage(consoleMessage)
+            }
+        }
         webView.addJavascriptInterface(Bridge(), "GSBridge")
     }
 

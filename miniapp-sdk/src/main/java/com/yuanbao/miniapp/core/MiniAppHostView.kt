@@ -39,12 +39,16 @@ class MiniAppHostView private constructor(
     fun setErrorListener(listener: (String) -> Unit) { onError = listener }
 
     companion object {
-        /** 引擎分派入口：读 app.json renderer（缺省 "webview"，微信语义传统通道默认启用） */
+        /**
+         * 引擎分派入口：读 app.json "renderer"。
+         * 默认 skyline（原生引擎）——存量小程序均按原生引擎调教生成；
+         * WebView 通道（CSS 全量兼容）为 opt-in：app.json 显式 "renderer":"webview"。
+         */
         fun create(context: Context, pkg: MiniPackage, appId: String): MiniAppHostView {
             val renderer = runCatching {
                 Regex("\"renderer\"\\s*:\\s*\"(webview|skyline)\"")
                     .find(pkg.read("app.json") ?: "")?.groupValues?.get(1)
-            }.getOrNull() ?: "webview"
+            }.getOrNull() ?: "skyline"
             return MiniAppHostView(context, pkg, appId, renderer)
         }
     }
